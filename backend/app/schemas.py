@@ -23,6 +23,17 @@ class ProblemListItem(BaseModel):
     pass_count: int
 
 
+class FormulaItem(BaseModel):
+    latex: str
+    label: str | None = None
+
+
+class ProblemPresentation(BaseModel):
+    formulas: list[FormulaItem] = Field(default_factory=list)
+    symbols: list[str] = Field(default_factory=list)
+    steps: list[str] = Field(default_factory=list)
+
+
 class ProblemDetail(BaseModel):
     id: int
     slug: str
@@ -36,6 +47,7 @@ class ProblemDetail(BaseModel):
     function_signature: str
     starter_code: str
     explanation: str
+    presentation: ProblemPresentation
     constraints: list[str]
     examples: list[dict[str, Any]]
     public_tests: list[dict[str, Any]]
@@ -65,7 +77,7 @@ class DraftResponse(BaseModel):
 class RunRequest(BaseModel):
     problem_id: int
     code: str
-    custom_tests: list[dict[str, Any]] | None = None
+    custom_tests: list[Any] | None = None
     language: str = "Python 3"
 
 

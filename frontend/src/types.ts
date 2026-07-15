@@ -27,6 +27,11 @@ export interface ProblemDetail extends ProblemListItem {
   function_signature: string;
   starter_code: string;
   explanation: string;
+  presentation: {
+    formulas: Array<{ latex: string; label?: string | null }>;
+    symbols: string[];
+    steps: string[];
+  };
   constraints: string[];
   examples: Array<Record<string, unknown>>;
   public_tests: Array<Record<string, unknown>>;

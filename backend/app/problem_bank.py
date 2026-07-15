@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import json
 import random
 from collections import Counter
 from typing import Any, Callable
@@ -30,22 +31,370 @@ COMPANY_TAGS = [
 ]
 
 
-def ndarray(data: Any, dtype: str = "float") -> dict[str, Any]:
-    return {"__type__": "ndarray", "dtype": dtype, "data": data}
+def formula(latex: str, label: str | None = None) -> dict[str, str]:
+    item = {"latex": latex}
+    if label:
+        item["label"] = label
+    return item
 
 
-def tensor(data: Any, dtype: str = "float") -> dict[str, Any]:
-    return {"__type__": "tensor", "dtype": dtype, "data": data}
+PRESENTATIONS: dict[str, dict[str, list[Any]]] = {
+    "matrix-transpose": {
+        "formulas": [formula(r"B_{j,i}=A_{i,j}")],
+        "symbols": ["A 的形状为 m×n，转置结果 B 的形状为 n×m。"],
+        "steps": ["交换行、列下标。", "空矩阵直接返回空结果。"],
+    },
+    "l2-normalize-vector": {
+        "formulas": [formula(r"\lVert x\rVert_2=\sqrt{\sum_{j=1}^{d}x_j^2}"), formula(r"\hat{x}_i=\frac{x_i}{\lVert x\rVert_2}")],
+        "symbols": ["x 是 d 维输入向量；零向量按题意返回全 0。"],
+        "steps": ["计算 L2 范数。", "处理零范数，否则逐元素除以范数。"],
+    },
+    "numpy-broadcast-add": {
+        "formulas": [formula(r"C_{i,j}=A_{i,j}+b_j", "按末尾维度广播的典型情形")],
+        "symbols": ["实际输入遵循 PyTorch 广播规则：从末尾维开始比较，维度相等、为 1 或不存在时可广播。"],
+        "steps": ["把输入转换为 Tensor。", "利用 PyTorch 广播完成逐元素相加。"],
+    },
+    "batch-cosine-similarity": {
+        "formulas": [formula(r"s_i=\frac{a_i^\top b_i}{\lVert a_i\rVert_2\lVert b_i\rVert_2}")],
+        "symbols": ["a_i、b_i 是第 i 个样本；任一向量范数为 0 时相似度记为 0。"],
+        "steps": ["逐行计算点积和两侧范数。", "仅在分母非零处执行除法。"],
+    },
+    "stable-softmax": {
+        "formulas": [formula(r"p_i=\frac{e^{x_i-m}}{\sum_j e^{x_j-m}},\qquad m=\max_j x_j")],
+        "symbols": ["减去最大值不会改变 Softmax 结果，却能避免指数溢出。"],
+        "steps": ["求最大值并平移 logits。", "计算指数，再除以指数和。"],
+    },
+    "log-sum-exp": {
+        "formulas": [formula(r"\operatorname{LSE}(x)=m+\log\sum_i e^{x_i-m},\qquad m=\max_i x_i")],
+        "symbols": ["m 是输入最大值，用于提升数值稳定性。"],
+        "steps": ["提出最大值。", "对平移后的指数求和并取对数。"],
+    },
+    "one-hot-encoding": {
+        "formulas": [formula(r"Y_{i,c}=\begin{cases}1,&c=y_i\\0,&c\ne y_i\end{cases}")],
+        "symbols": ["y_i 是第 i 个类别下标，c 的范围是 0 到 num_classes−1。"],
+        "steps": ["创建形状为 (N, C) 的全零 Tensor。", "在每行的目标类别位置写入 1。"],
+    },
+    "sliding-window-sum": {
+        "formulas": [formula(r"s_i=\sum_{j=0}^{w-1}x_{i+j}")],
+        "symbols": ["w 是窗口宽度；输出长度为 n−w+1。"],
+        "steps": ["可用前缀和或一维卷积计算。", "窗口非法时返回空结果。"],
+    },
+    "linear-regression-predict": {
+        "formulas": [formula(r"\hat{y}=Xw+b")],
+        "symbols": ["X 为批量特征矩阵，w 为权重向量，b 为标量偏置。"],
+        "steps": ["计算矩阵与权重向量的乘积。", "对每个样本加上偏置。"],
+    },
+    "sigmoid-probabilities": {
+        "formulas": [formula(r"\sigma(x)=\frac{1}{1+e^{-x}}")],
+        "symbols": ["对负数使用等价形式 e^x/(1+e^x) 可避免溢出。"],
+        "steps": ["按数值正负选择稳定形式。", "逐元素返回 (0,1) 内的概率。"],
+    },
+    "knn-majority-vote": {
+        "formulas": [formula(r"d(x,q)^2=\sum_j(x_j-q_j)^2"), formula(r"\hat y=\operatorname{mode}\{y_i:i\in\operatorname{TopKSmallest}(d_i)\}")],
+        "symbols": ["距离相同时按样本原顺序；票数相同时返回较小标签。"],
+        "steps": ["计算查询点到所有训练点的距离。", "取最近 k 个标签并多数投票。"],
+    },
+    "kmeans-assign": {
+        "formulas": [formula(r"z_i=\arg\min_k\lVert x_i-\mu_k\rVert_2^2")],
+        "symbols": ["μ_k 是第 k 个聚类中心；距离相同选择较小下标。"],
+        "steps": ["计算每个样本到每个中心的平方距离。", "逐行取最小距离对应的中心。"],
+    },
+    "information-entropy": {
+        "formulas": [formula(r"H(Y)=-\sum_c p_c\log_2 p_c")],
+        "symbols": ["p_c 是类别 c 在标签中的频率；空输入的熵定义为 0。"],
+        "steps": ["统计各类别频率。", "累加 −p·log₂p。"],
+    },
+    "gini-index": {
+        "formulas": [formula(r"G(Y)=1-\sum_c p_c^2")],
+        "symbols": ["p_c 是类别 c 的经验概率。"],
+        "steps": ["统计类别概率。", "用 1 减去概率平方和。"],
+    },
+    "standardize-feature": {
+        "formulas": [formula(r"\mu=\frac1N\sum_i x_i,\qquad \sigma=\sqrt{\frac1N\sum_i(x_i-\mu)^2}"), formula(r"z_i=\frac{x_i-\mu}{\sigma}")],
+        "symbols": ["这里使用总体方差（unbiased=False）；标准差为 0 时返回全 0。"],
+        "steps": ["计算均值和总体标准差。", "处理零标准差，否则执行标准化。"],
+    },
+    "precision-recall-f1": {
+        "formulas": [formula(r"P=\frac{TP}{TP+FP},\qquad R=\frac{TP}{TP+FN}"), formula(r"F_1=\frac{2PR}{P+R}")],
+        "symbols": ["分母为 0 时，对应指标按题意取 0。"],
+        "steps": ["统计 TP、FP、FN。", "依次计算 Precision、Recall 和 F1。"],
+    },
+    "gradient-descent-step": {
+        "formulas": [formula(r"L=\frac1N\sum_i(wx_i+b-y_i)^2"), formula(r"w\leftarrow w-\eta\frac{\partial L}{\partial w},\qquad b\leftarrow b-\eta\frac{\partial L}{\partial b}")],
+        "symbols": ["η 是学习率 lr。"],
+        "steps": ["计算预测和 MSE 对 w、b 的梯度。", "沿负梯度方向更新一次。"],
+    },
+    "relu-activation": {
+        "formulas": [formula(r"\operatorname{ReLU}(x)=\max(0,x)")],
+        "symbols": ["逐元素应用。"],
+        "steps": ["把输入转换为 Tensor。", "使用 torch.relu 返回结果。"],
+    },
+    "sigmoid-activation": {
+        "formulas": [formula(r"\sigma(x)=\frac{1}{1+e^{-x}}")],
+        "symbols": ["逐元素应用。"],
+        "steps": ["把输入转换为浮点 Tensor。", "使用 torch.sigmoid 计算。"],
+    },
+    "row-wise-softmax": {
+        "formulas": [formula(r"p_{i,j}=\frac{e^{x_{i,j}-m_i}}{\sum_k e^{x_{i,k}-m_i}},\qquad m_i=\max_k x_{i,k}")],
+        "symbols": ["每一行是一个独立样本，沿最后一维归一化。"],
+        "steps": ["逐行减去最大值。", "沿最后一维计算 Softmax。"],
+    },
+    "cross-entropy-loss": {
+        "formulas": [formula(r"L=-\frac1N\sum_{i=1}^N\log\frac{e^{z_{i,y_i}}}{\sum_c e^{z_{i,c}}}")],
+        "symbols": ["z 是未经 Softmax 的 logits，y_i 是目标类别下标。"],
+        "steps": ["直接对 logits 使用稳定的 log_softmax。", "取目标类别负对数似然并求平均。"],
+    },
+    "mean-squared-error": {
+        "formulas": [formula(r"L=\frac1N\sum_{i=1}^N(\hat y_i-y_i)^2")],
+        "symbols": ["N 表示所有元素的数量。"],
+        "steps": ["计算逐元素误差平方。", "对全部元素取平均。"],
+    },
+    "dropout-forward-train": {
+        "formulas": [formula(r"y_i=\frac{m_i x_i}{1-p},\qquad m_i\sim\operatorname{Bernoulli}(1-p)")],
+        "symbols": ["p 是丢弃概率；题目直接给定 0/1 mask，因此结果可复现。"],
+        "steps": ["应用给定 mask。", "除以保留概率 1−p 维持期望不变。"],
+    },
+    "batch-norm-forward": {
+        "formulas": [formula(r"\mu_j=\frac1N\sum_i x_{i,j},\qquad \sigma_j^2=\frac1N\sum_i(x_{i,j}-\mu_j)^2"), formula(r"y_{i,j}=\gamma_j\frac{x_{i,j}-\mu_j}{\sqrt{\sigma_j^2+\varepsilon}}+\beta_j")],
+        "symbols": ["统计量沿 batch 维计算；方差使用 biased 估计（unbiased=False）。"],
+        "steps": ["沿第 0 维求均值和方差并保留维度。", "归一化后应用可学习缩放 γ 和偏置 β。"],
+    },
+    "layer-norm-forward": {
+        "formulas": [formula(r"\mu_i=\frac1D\sum_j x_{i,j},\qquad \sigma_i^2=\frac1D\sum_j(x_{i,j}-\mu_i)^2"), formula(r"y_{i,j}=\gamma_j\frac{x_{i,j}-\mu_i}{\sqrt{\sigma_i^2+\varepsilon}}+\beta_j")],
+        "symbols": ["统计量对每个样本独立地沿特征维计算。"],
+        "steps": ["沿最后一维计算均值和总体方差。", "归一化后应用 γ 和 β。"],
+    },
+    "conv1d-valid": {
+        "formulas": [formula(r"y_i=\sum_{j=0}^{K-1}x_{i+j}w_j,\qquad i=0,\ldots,L-K")],
+        "symbols": ["采用深度学习中的互相关定义，不翻转卷积核；无 padding、stride=1。"],
+        "steps": ["滑动长度为 K 的窗口。", "窗口与核逐元素相乘后求和。"],
+    },
+    "autograd-square-grad": {
+        "formulas": [formula(r"y=\sum_i x_i^2,\qquad \frac{\partial y}{\partial x_i}=2x_i")],
+        "symbols": ["需要让输入 Tensor 开启 requires_grad。"],
+        "steps": ["构建标量损失 y。", "调用 backward 并返回 x.grad。"],
+    },
+    "torch-no-grad-update": {
+        "formulas": [formula(r"\theta\leftarrow\theta-\eta g")],
+        "symbols": ["更新过程不应被 autograd 记录。"],
+        "steps": ["进入 torch.no_grad 上下文。", "用学习率乘梯度并更新参数。"],
+    },
+    "gradient-accumulation": {
+        "formulas": [formula(r"g=\frac1N\sum_{b}\sum_{i\in b}2(wx_i-y_i)x_i,\qquad w\leftarrow w-\eta g")],
+        "symbols": ["N 是所有 micro-batch 的样本总数，不是 batch 数。"],
+        "steps": ["累加所有样本的梯度和数量。", "统一取平均并只更新一次。"],
+    },
+    "causal-mask": {
+        "formulas": [formula(r"M_{i,j}=\mathbb{1}[j>i]")],
+        "symbols": ["True 表示需要屏蔽，即每个位置不能关注未来 token。"],
+        "steps": ["创建方阵。", "取主对角线上方的严格上三角区域。"],
+    },
+    "custom-mse-loss": {
+        "formulas": [formula(r"L=\operatorname{mean}\left((\hat y-y)^2\right)")],
+        "symbols": ["必须保留 autograd 计算图。"],
+        "steps": ["用 Tensor 运算计算差的平方。", "对全部元素求均值。"],
+    },
+    "optimizer-step-list": {
+        "formulas": [formula(r"\theta_i\leftarrow\theta_i-\eta g_i")],
+        "symbols": ["params 与 grads 一一对应。"],
+        "steps": ["配对遍历参数和梯度。", "返回更新后的 Tensor 列表。"],
+    },
+    "scaled-dot-product-attention": {
+        "formulas": [formula(r"\operatorname{Attention}(Q,K,V)=\operatorname{softmax}\left(\frac{QK^\top}{\sqrt{d_k}}\right)V")],
+        "symbols": ["d_k 是 Query/Key 的最后一维；Softmax 沿 Key 的序列维执行。"],
+        "steps": ["计算 Q 与 K 转置的缩放点积。", "沿最后一维做 Softmax。", "注意力权重乘 V。"],
+    },
+    "attention-mask-softmax": {
+        "formulas": [formula(r"P_{i,:}=\operatorname{softmax}(S_{i,:}+M_{i,:}),\qquad M_{i,j}=\begin{cases}-\infty,&\text{masked}\\0,&\text{otherwise}\end{cases}")],
+        "symbols": ["输入 mask=True 的位置不可被关注。"],
+        "steps": ["在被屏蔽位置填入负无穷。", "沿最后一维做稳定 Softmax。"],
+    },
+    "sinusoidal-positional-encoding": {
+        "formulas": [formula(r"PE_{(pos,2i)}=\sin\left(\frac{pos}{10000^{2i/d_{\text{model}}}}\right)", "偶数维"), formula(r"PE_{(pos,2i+1)}=\cos\left(\frac{pos}{10000^{2i/d_{\text{model}}}}\right)", "奇数维")],
+        "symbols": ["pos=0,…,length−1 是位置；i=0,… 是频率下标；d_model=dim 是编码维数。", "dim 为奇数时，最后一个偶数维仍计算 sin，没有与之配对的 cos 维。"],
+        "steps": ["构造位置列向量 pos 和偶数维下标。", "一次性计算不同频率的角度矩阵。", "偶数列写入 sin，存在的奇数列写入 cos。"],
+    },
+    "split-heads": {
+        "formulas": [formula(r"(B,L,D)\rightarrow(B,L,H,D/H)\rightarrow(B,H,L,D/H)")],
+        "symbols": ["B 为 batch，L 为序列长度，H 为头数，D 必须能被 H 整除。"],
+        "steps": ["把最后一维 reshape 为 (H, D/H)。", "交换序列维与头维。"],
+    },
+    "combine-heads": {
+        "formulas": [formula(r"(B,H,L,D_h)\rightarrow(B,L,H,D_h)\rightarrow(B,L,HD_h)")],
+        "symbols": ["这是 split_heads 的逆变换。"],
+        "steps": ["把头维换回序列维之后。", "确保 contiguous，再合并头维和 head_dim。"],
+    },
+    "label-smoothing": {
+        "formulas": [formula(r"q_c=(1-\varepsilon)\mathbb{1}[c=y]+\frac{\varepsilon}{C}")],
+        "symbols": ["C 是类别数；目标类概率为 1−ε+ε/C，其他类为 ε/C。"],
+        "steps": ["先用 ε/C 填满分布。", "给目标类别额外加上 1−ε。"],
+    },
+    "conv2d-valid": {
+        "formulas": [formula(r"Y_{i,j}=\sum_{u=0}^{K_h-1}\sum_{v=0}^{K_w-1}X_{i+u,j+v}W_{u,v}")],
+        "symbols": ["采用互相关定义；无 padding、stride=1。"],
+        "steps": ["提取所有有效滑动窗口。", "窗口与卷积核逐元素相乘并求和。"],
+    },
+    "max-pool2d": {
+        "formulas": [formula(r"Y_{i,j}=\max_{0\le u,v<K}X_{is+u,js+v}")],
+        "symbols": ["K 是 kernel_size，s 是 stride。"],
+        "steps": ["按 stride 提取 K×K 窗口。", "对每个窗口取最大值。"],
+    },
+    "box-iou": {
+        "formulas": [formula(r"\operatorname{IoU}(A,B)=\frac{|A\cap B|}{|A\cup B|}=\frac{I}{|A|+|B|-I}")],
+        "symbols": ["框格式为 [x₁,y₁,x₂,y₂]；无交集时 I=0。"],
+        "steps": ["计算交集矩形宽高并截断到非负。", "计算交集、并集及其比值。"],
+    },
+    "nms": {
+        "formulas": [formula(r"\text{保留 }i\iff s_i\text{ 当前最大，随后删除 }\{j:\operatorname{IoU}(b_i,b_j)>\tau\}")],
+        "symbols": ["s_i 是置信度，τ 是 IoU 阈值；分数相同优先较小原下标。"],
+        "steps": ["按分数降序排列候选框。", "反复保留最高分框。", "移除与其 IoU 超过阈值的剩余框。"],
+    },
+    "sequence-cross-entropy-ignore-pad": {
+        "formulas": [formula(r"L=-\frac{1}{\sum_{b,t}m_{b,t}}\sum_{b,t}m_{b,t}\log p_{b,t,y_{b,t}},\qquad m_{b,t}=\mathbb{1}[y_{b,t}\ne pad\_id]")],
+        "symbols": ["只对非 Padding token 求平均；若没有有效 token，返回 0。"],
+        "steps": ["把 logits 展平并计算逐 token 交叉熵。", "用标签掩码筛掉 pad_id。", "对有效损失取平均。"],
+    },
+    "count-parameters": {
+        "formulas": [formula(r"N_{\text{params}}=\sum_{t}\prod_{d\in\operatorname{shape}(t)}d")],
+        "symbols": ["每个 Tensor 的参数量等于其各维长度的乘积。"],
+        "steps": ["对每个 shape 求维度乘积。", "累加所有 Tensor 的参数量。"],
+    },
+    "pairwise-euclidean-distance": {
+        "formulas": [formula(r"D_{i,j}=\lVert x_i-y_j\rVert_2=\sqrt{\sum_k(x_{i,k}-y_{j,k})^2}")],
+        "symbols": ["输出形状为 (N,M)，结果需要截断微小负数后再开方。"],
+        "steps": ["利用广播或平方范数恒等式构造两两平方距离。", "clamp 到非负后开方。"],
+    },
+    "binary-cross-entropy-logits": {
+        "formulas": [formula(r"\ell(x,y)=\max(x,0)-xy+\log(1+e^{-|x|})")],
+        "symbols": ["x 是 logits，y∈{0,1}；返回所有元素的平均损失。"],
+        "steps": ["直接使用稳定的 binary_cross_entropy_with_logits。", "不要先手写 Sigmoid 再取对数。"],
+    },
+    "binary-focal-loss": {
+        "formulas": [formula(r"FL=-\alpha_t(1-p_t)^\gamma\log p_t")],
+        "symbols": ["p_t 是真实类别的预测概率；正类 α_t=α，负类 α_t=1−α。"],
+        "steps": ["从 logits 稳定计算逐元素 BCE。", "构造 p_t 和 α_t，加权后取平均。"],
+    },
+    "dice-loss": {
+        "formulas": [formula(r"L_{Dice}=1-\frac{2\sum_i p_i y_i+\varepsilon}{\sum_i p_i+\sum_i y_i+\varepsilon}")],
+        "symbols": ["p 是 sigmoid(logits)；本题在整个 batch 上计算一个 Dice。"],
+        "steps": ["对 logits 做 Sigmoid。", "计算交集和分母并返回 1−Dice。"],
+    },
+    "rms-norm": {
+        "formulas": [formula(r"\operatorname{RMS}(x)=\sqrt{\frac1D\sum_{j=1}^D x_j^2+\varepsilon}"), formula(r"y_j=\gamma_j\frac{x_j}{\operatorname{RMS}(x)}")],
+        "symbols": ["沿最后一维归一化；RMSNorm 不减均值。"],
+        "steps": ["沿最后一维计算均方根。", "归一化后乘逐维权重 γ。"],
+    },
+    "swiglu-activation": {
+        "formulas": [formula(r"\operatorname{SwiGLU}(a,b)=\operatorname{SiLU}(a)\odot b,\qquad \operatorname{SiLU}(a)=a\sigma(a)")],
+        "symbols": ["a 与 b 形状相同，⊙ 表示逐元素乘法。"],
+        "steps": ["对 gate 输入应用 SiLU。", "与 value 输入逐元素相乘。"],
+    },
+    "rotary-position-embedding": {
+        "formulas": [formula(r"\theta_{pos,i}=\frac{pos}{base^{2i/d}}"), formula(r"\begin{bmatrix}x'_{2i}\\x'_{2i+1}\end{bmatrix}=\begin{bmatrix}\cos\theta&-\sin\theta\\\sin\theta&\cos\theta\end{bmatrix}\begin{bmatrix}x_{2i}\\x_{2i+1}\end{bmatrix}")],
+        "symbols": ["输入形状为 (seq, dim)，dim 必须为偶数；base 默认 10000。"],
+        "steps": ["按位置和维度对生成旋转角。", "把相邻偶/奇维成对旋转。"],
+    },
+    "lora-linear-forward": {
+        "formulas": [formula(r"Y=XW^\top+\frac{\alpha}{r}(XA^\top)B^\top")],
+        "symbols": ["W∈R^{o×d}，A∈R^{r×d}，B∈R^{o×r}，r 是 LoRA rank。"],
+        "steps": ["计算冻结主权重的线性输出。", "计算低秩支路并按 α/r 缩放后相加。"],
+    },
+    "clip-grad-global-norm": {
+        "formulas": [formula(r"G=\sqrt{\sum_k\lVert g_k\rVert_2^2},\qquad g'_k=g_k\min\left(1,\frac{c}{G+\varepsilon}\right)")],
+        "symbols": ["c 是 max_norm；所有梯度共享同一个缩放系数。"],
+        "steps": ["累加全部梯度的平方和得到全局范数。", "只在超限时按同一比例缩放。"],
+    },
+    "sgd-momentum-step": {
+        "formulas": [formula(r"v_t=\mu v_{t-1}+g_t,\qquad \theta_t=\theta_{t-1}-\eta v_t")],
+        "symbols": ["μ 是 momentum，η 是学习率。"],
+        "steps": ["先更新速度。", "再用新速度更新参数。"],
+    },
+    "adamw-step": {
+        "formulas": [formula(r"m_t=\beta_1m_{t-1}+(1-\beta_1)g_t,\quad v_t=\beta_2v_{t-1}+(1-\beta_2)g_t^2"), formula(r"\theta_t=(1-\eta\lambda)\theta_{t-1}-\eta\frac{m_t/(1-\beta_1^t)}{\sqrt{v_t/(1-\beta_2^t)}+\varepsilon}")],
+        "symbols": ["λ 是解耦 weight_decay；t=step 从 1 开始。"],
+        "steps": ["更新一、二阶矩。", "做偏差修正。", "分别应用权重衰减和自适应梯度更新。"],
+    },
+    "warmup-cosine-learning-rate": {
+        "formulas": [formula(r"\eta_t=\eta_{max}\frac{t+1}{T_w},\quad t<T_w"), formula(r"\eta_t=\eta_{min}+\frac{\eta_{max}-\eta_{min}}2\left(1+\cos(\pi p)\right),\quad p=\frac{t-T_w}{T-T_w-1}")],
+        "symbols": ["step=t 从 0 开始；最后一步恰好等于 min_lr。"],
+        "steps": ["warmup 阶段线性升高。", "余下阶段按余弦曲线衰减。"],
+    },
+    "exponential-moving-average": {
+        "formulas": [formula(r"\bar\theta_t=\beta\bar\theta_{t-1}+(1-\beta)\theta_t")],
+        "symbols": ["β=decay；shadow 是上一步 EMA 参数。"],
+        "steps": ["按 decay 保留历史 shadow。", "加入当前参数的 (1−decay) 权重。"],
+    },
+    "top-p-sampling-candidates": {
+        "formulas": [formula(r"k=\min\left\{m:\sum_{i=1}^{m}p_{(i)}\ge p_{nucleus}\right\}")],
+        "symbols": ["p_(i) 按概率降序排列；至少保留一个 token。"],
+        "steps": ["稳定地按概率降序排序。", "找到累计概率首次达到阈值的位置。", "返回此前所有原下标。"],
+    },
+    "perplexity-from-token-losses": {
+        "formulas": [formula(r"\operatorname{PPL}=\exp\left(\frac1N\sum_{i=1}^{N}\ell_i\right)")],
+        "symbols": ["ℓ_i 是每个有效 token 的自然对数交叉熵。"],
+        "steps": ["计算 token loss 的均值。", "对均值取指数。"],
+    },
+    "info-nce-loss": {
+        "formulas": [formula(r"s_{i,j}=\frac{\hat a_i^\top\hat b_j}{\tau},\qquad L=-\frac1N\sum_i\log\frac{e^{s_{i,i}}}{\sum_j e^{s_{i,j}}}")],
+        "symbols": ["先对两组 embedding 做 L2 归一化；正样本位于对角线。"],
+        "steps": ["归一化两组 embedding。", "计算温度缩放的相似度矩阵。", "以对角线下标为标签计算交叉熵。"],
+    },
+    "knowledge-distillation-kl": {
+        "formulas": [formula(r"L=T^2\frac1N\sum_i\operatorname{KL}\left(\operatorname{softmax}(z_i^t/T)\,\Vert\,\operatorname{softmax}(z_i^s/T)\right)")],
+        "symbols": ["T 是温度；KL 按 batchmean 约简并乘 T²。"],
+        "steps": ["教师 logits 用 softmax，学生 logits 用 log_softmax。", "计算 KL 散度并乘温度平方。"],
+    },
+    "global-average-pooling": {
+        "formulas": [formula(r"y_c=\frac1{HW}\sum_{h=1}^{H}\sum_{w=1}^{W}x_{c,h,w}")],
+        "symbols": ["输入形状为 (C,H,W)，输出形状为 (C,)。"],
+        "steps": ["沿最后两个空间维求平均。"],
+    },
+    "top-k-accuracy": {
+        "formulas": [formula(r"\operatorname{Acc@k}=\frac1N\sum_i\mathbb{1}\left[y_i\in\operatorname{TopK}(z_i)\right]")],
+        "symbols": ["z_i 是第 i 个样本的 logits。"],
+        "steps": ["沿类别维取 Top-K 下标。", "判断真实标签是否出现并求平均。"],
+    },
+    "symmetric-quantize-dequantize": {
+        "formulas": [formula(r"s=\frac{\max_i|x_i|}{2^{b-1}-1},\qquad q_i=\operatorname{clip}(\operatorname{round}(x_i/s),-Q,Q)"), formula(r"\hat x_i=sq_i")],
+        "symbols": ["b=num_bits，Q=2^{b−1}−1；全零输入直接返回全零。"],
+        "steps": ["由最大绝对值计算对称量化 scale。", "舍入并截断到整数范围。", "乘 scale 得到反量化结果。"],
+    },
+}
+
+
+def problem_presentation(slug: str, explanation: str) -> dict[str, list[Any]]:
+    configured = PRESENTATIONS.get(slug, {})
+    return {
+        "formulas": configured.get("formulas", []),
+        "symbols": configured.get("symbols", []),
+        "steps": configured.get("steps", [explanation]),
+    }
+
+
+def ndarray(data: Any, dtype: str = "float", shape: list[int] | None = None) -> dict[str, Any]:
+    value = {"__type__": "ndarray", "dtype": dtype, "data": data}
+    if shape is not None:
+        value["shape"] = shape
+    return value
+
+
+def tensor(data: Any, dtype: str = "float", shape: list[int] | None = None) -> dict[str, Any]:
+    value = {"__type__": "tensor", "dtype": dtype, "data": data}
+    if shape is not None:
+        value["shape"] = shape
+    return value
 
 
 def materialize(value: Any) -> Any:
     if isinstance(value, dict) and "__type__" in value:
         if value["__type__"] == "ndarray":
             dtype = float if value.get("dtype") == "float" else int
-            return np.array(value["data"], dtype=dtype)
+            array = np.array(value["data"], dtype=dtype)
+            return array.reshape(value["shape"]) if "shape" in value else array
         if value["__type__"] == "tensor":
             dtype = torch.float32 if value.get("dtype") == "float" else torch.long
-            return torch.tensor(value["data"], dtype=dtype)
+            value_tensor = torch.tensor(value["data"], dtype=dtype)
+            return value_tensor.reshape(value["shape"]) if "shape" in value else value_tensor
         if value["__type__"] == "nan":
             return float("nan")
     if isinstance(value, list):
@@ -57,11 +406,11 @@ def materialize(value: Any) -> Any:
 
 def to_jsonable(value: Any) -> Any:
     if isinstance(value, np.ndarray):
-        return ndarray(value.tolist(), "float" if value.dtype.kind == "f" else "int")
+        return ndarray(value.tolist(), "float" if value.dtype.kind == "f" else "int", list(value.shape))
     if isinstance(value, torch.Tensor):
         detached = value.detach().cpu()
         dtype = "float" if detached.dtype.is_floating_point else "int"
-        return tensor(detached.tolist(), dtype)
+        return tensor(detached.tolist(), dtype, list(detached.shape))
     if isinstance(value, (np.floating,)):
         return float(value)
     if isinstance(value, (np.integer,)):
@@ -105,9 +454,25 @@ def starter(signature: str, imports: str = "", body: str = "    pass") -> str:
 
 def format_value(value: Any) -> str:
     value = to_jsonable(value)
-    if isinstance(value, dict) and value.get("__type__") in {"ndarray", "tensor"}:
-        return f"{value['__type__']}({value['data']})"
-    return repr(value)
+    return json.dumps(value, ensure_ascii=False)
+
+
+def format_output_value(value: Any) -> str:
+    value = to_jsonable(value)
+    if isinstance(value, dict) and value.get("__type__") == "tensor":
+        return f"torch.tensor({json.dumps(value['data'], ensure_ascii=False)})"
+    if isinstance(value, dict) and value.get("__type__") == "ndarray":
+        return f"np.array({json.dumps(value['data'], ensure_ascii=False)})"
+    return json.dumps(value, ensure_ascii=False)
+
+
+def display_input(args: list[Any], kwargs: dict[str, Any] | None = None) -> str:
+    kwargs = kwargs or {}
+    if len(args) == 1 and not kwargs:
+        return format_value(args[0])
+    if kwargs:
+        return format_value({"args": args, "kwargs": kwargs})
+    return format_value(args)
 
 
 def make_problem(
@@ -127,6 +492,8 @@ def make_problem(
     constraints: list[str],
     imports: str = "",
     starter_code: str | None = None,
+    company_tags: list[str] | None = None,
+    source_note: str | None = None,
     time_limit: float = 2.0,
     memory_limit: int = 256,
 ) -> dict[str, Any]:
@@ -135,8 +502,8 @@ def make_problem(
     hidden_tests = tests[3:]
     examples = [
         {
-            "input": format_value(raw_cases[i]["args"]),
-            "output": format_value(tests[i]["expected"]),
+            "input": display_input(raw_cases[i]["args"], raw_cases[i].get("kwargs", {})),
+            "output": format_output_value(tests[i]["expected"]),
             "explanation": "覆盖常见输入或边界条件。",
         }
         for i in range(min(2, len(public_tests)))
@@ -147,14 +514,17 @@ def make_problem(
         "title": title,
         "difficulty": difficulty,
         "categories": [category],
-        "company_tags": [COMPANY_TAGS[pid % len(COMPANY_TAGS)], COMPANY_TAGS[(pid * 3) % len(COMPANY_TAGS)]],
-        "source_note": "常见公开面试知识点改编题，题面与测试数据为 DLCode 原创整理；公司标签仅表示相似高频方向。",
+        "company_tags": company_tags
+        or [COMPANY_TAGS[pid % len(COMPANY_TAGS)], COMPANY_TAGS[(pid * 3) % len(COMPANY_TAGS)]],
+        "source_note": source_note
+        or "依据公开论文、PyTorch 官方接口与 Applied Scientist / MLE 常见能力范围原创改编；公司标签仅表示相似高频方向，不声明为真实原题。",
         "description": description,
         "function_name": function_name,
         "function_signature": signature,
         "starter_code": starter_code or starter(signature, imports),
         "solution_code": solution_code,
         "explanation": explanation,
+        "presentation": problem_presentation(slug, explanation),
         "constraints": constraints,
         "examples": examples,
         "public_tests": public_tests,
@@ -165,11 +535,11 @@ def make_problem(
 
 
 def py_imports() -> str:
-    return "from typing import Any\nimport math\nimport numpy as np"
+    return "from typing import Any\nimport math"
 
 
 def torch_imports() -> str:
-    return "from typing import Any\nimport math\nimport numpy as np\nimport torch\nfrom torch import nn"
+    return "from typing import Any\nimport torch"
 
 
 def get_seed_problems() -> list[dict[str, Any]]:
@@ -182,7 +552,7 @@ def get_seed_problems() -> list[dict[str, Any]]:
         slug="matrix-transpose",
         title="矩阵转置",
         difficulty="简单",
-        category="Python 与 NumPy 基础",
+        category="Python 与 PyTorch 基础",
         function_name="matrix_transpose",
         signature="def matrix_transpose(matrix: list[list[float]]) -> list[list[float]]",
         description="给定一个二维列表表示的矩阵，返回它的转置矩阵。输入矩阵可能只有一行或一列。",
@@ -207,7 +577,7 @@ def get_seed_problems() -> list[dict[str, Any]]:
         slug="l2-normalize-vector",
         title="向量 L2 归一化",
         difficulty="简单",
-        category="Python 与 NumPy 基础",
+        category="Python 与 PyTorch 基础",
         function_name="l2_normalize",
         signature="def l2_normalize(vector: list[float]) -> list[float]",
         description="实现向量的 L2 归一化。若向量范数为 0，返回与输入等长的全 0 向量。",
@@ -234,11 +604,11 @@ def get_seed_problems() -> list[dict[str, Any]]:
         slug="numpy-broadcast-add",
         title="广播加法",
         difficulty="简单",
-        category="Python 与 NumPy 基础",
+        category="Python 与 PyTorch 基础",
         function_name="broadcast_add",
-        signature="def broadcast_add(a: Any, b: Any) -> np.ndarray",
-        description="使用 NumPy 广播机制返回 a + b 的结果。输入可以是标量、列表或二维列表。",
-        reference=lambda a, b: np.asarray(a) + np.asarray(b),
+        signature="def broadcast_add(a: Any, b: Any) -> torch.Tensor",
+        description="使用 PyTorch 广播机制返回 a + b 的结果。输入可以是标量、列表或二维列表。",
+        reference=lambda a, b: torch.as_tensor(a) + torch.as_tensor(b),
         raw_cases=[
             case([[[1, 2, 3], [4, 5, 6]], [10, 20, 30]]),
             case([[1, 2, 3], 5]),
@@ -249,29 +619,29 @@ def get_seed_problems() -> list[dict[str, Any]]:
             case([[1], [2, 3, 4]]),
             case([[[0, 0]], 0]),
         ],
-        imports=py_imports(),
-        solution_code="import numpy as np\n\ndef broadcast_add(a, b):\n    return np.asarray(a) + np.asarray(b)\n",
-        explanation="把输入转换成 ndarray 后直接使用 +，NumPy 会按照广播规则扩展维度。",
-        constraints=["输入满足 NumPy 可广播条件", "返回值必须是 np.ndarray"],
+        imports=torch_imports(),
+        solution_code="import torch\n\ndef broadcast_add(a, b):\n    return torch.as_tensor(a) + torch.as_tensor(b)\n",
+        explanation="把输入转换成 Tensor 后直接使用 +，PyTorch 会按照广播规则扩展维度。",
+        constraints=["输入满足 PyTorch 可广播条件", "返回值必须是 torch.Tensor"],
     )
 
-    def ref_cosine(a: Any, b: Any) -> np.ndarray:
-        a_arr = np.asarray(a, dtype=float)
-        b_arr = np.asarray(b, dtype=float)
-        denom = np.linalg.norm(a_arr, axis=1) * np.linalg.norm(b_arr, axis=1)
-        out = np.zeros(a_arr.shape[0], dtype=float)
+    def ref_cosine(a: Any, b: Any) -> torch.Tensor:
+        a_arr = torch.as_tensor(a, dtype=torch.float64)
+        b_arr = torch.as_tensor(b, dtype=torch.float64)
+        denom = torch.linalg.vector_norm(a_arr, dim=1) * torch.linalg.vector_norm(b_arr, dim=1)
+        out = torch.zeros(a_arr.shape[0], dtype=torch.float64)
         mask = denom != 0
-        out[mask] = np.sum(a_arr[mask] * b_arr[mask], axis=1) / denom[mask]
+        out[mask] = torch.sum(a_arr[mask] * b_arr[mask], dim=1) / denom[mask]
         return out
 
     add(
         slug="batch-cosine-similarity",
         title="批量余弦相似度",
         difficulty="中等",
-        category="Python 与 NumPy 基础",
+        category="Python 与 PyTorch 基础",
         function_name="batch_cosine_similarity",
-        signature="def batch_cosine_similarity(a: Any, b: Any) -> np.ndarray",
-        description="给定两个形状相同的二维数组，返回每一行之间的余弦相似度。若某一行存在零向量，该行结果记为 0。",
+        signature="def batch_cosine_similarity(a: Any, b: Any) -> torch.Tensor",
+        description="给定两个形状相同的二维输入，使用 PyTorch 返回每一行之间的余弦相似度。若某一行存在零向量，该行结果记为 0。",
         reference=ref_cosine,
         raw_cases=[
             case([[[1, 0], [1, 1]], [[1, 0], [1, -1]]]),
@@ -283,8 +653,8 @@ def get_seed_problems() -> list[dict[str, Any]]:
             case([[[1, 1, 1], [1, 0, 0]], [[1, 1, 1], [0, 1, 0]]]),
             case([[[0, 1]], [[0, -1]]]),
         ],
-        imports=py_imports(),
-        solution_code="import numpy as np\n\ndef batch_cosine_similarity(a, b):\n    a = np.asarray(a, dtype=float)\n    b = np.asarray(b, dtype=float)\n    denom = np.linalg.norm(a, axis=1) * np.linalg.norm(b, axis=1)\n    out = np.zeros(a.shape[0], dtype=float)\n    mask = denom != 0\n    out[mask] = np.sum(a[mask] * b[mask], axis=1) / denom[mask]\n    return out\n",
+        imports=torch_imports(),
+        solution_code="import torch\n\ndef batch_cosine_similarity(a, b):\n    a = torch.as_tensor(a, dtype=torch.float64)\n    b = torch.as_tensor(b, dtype=torch.float64)\n    denom = torch.linalg.vector_norm(a, dim=1) * torch.linalg.vector_norm(b, dim=1)\n    out = torch.zeros(a.shape[0], dtype=torch.float64)\n    mask = denom != 0\n    out[mask] = torch.sum(a[mask] * b[mask], dim=1) / denom[mask]\n    return out\n",
         explanation="分子是逐行点积，分母是两组向量范数乘积；零范数行不能直接相除。",
         constraints=["a 与 b 形状一致", "二维数组行数至少为 1", "误差容忍 1e-6"],
     )
@@ -293,7 +663,7 @@ def get_seed_problems() -> list[dict[str, Any]]:
         slug="top-k-values",
         title="Top-K 最大值",
         difficulty="简单",
-        category="Python 与 NumPy 基础",
+        category="Python 与 PyTorch 基础",
         function_name="top_k",
         signature="def top_k(values: list[float], k: int) -> list[float]",
         description="返回列表中最大的 k 个数，按从大到小排列。若 k 大于列表长度，返回全部元素。",
@@ -326,7 +696,7 @@ def get_seed_problems() -> list[dict[str, Any]]:
         slug="stable-softmax",
         title="稳定版 Softmax",
         difficulty="中等",
-        category="Python 与 NumPy 基础",
+        category="Python 与 PyTorch 基础",
         function_name="stable_softmax",
         signature="def stable_softmax(logits: list[float]) -> list[float]",
         description="实现数值稳定的一维 Softmax。需要通过减去最大值避免 exp 溢出。",
@@ -355,7 +725,7 @@ def get_seed_problems() -> list[dict[str, Any]]:
         slug="log-sum-exp",
         title="LogSumExp",
         difficulty="中等",
-        category="Python 与 NumPy 基础",
+        category="Python 与 PyTorch 基础",
         function_name="log_sum_exp",
         signature="def log_sum_exp(values: list[float]) -> float",
         description="计算 log(sum(exp(values)))，要求使用数值稳定写法。",
@@ -380,11 +750,13 @@ def get_seed_problems() -> list[dict[str, Any]]:
         slug="one-hot-encoding",
         title="独热编码",
         difficulty="简单",
-        category="Python 与 NumPy 基础",
+        category="Python 与 PyTorch 基础",
         function_name="one_hot",
-        signature="def one_hot(indices: list[int], num_classes: int) -> np.ndarray",
+        signature="def one_hot(indices: list[int], num_classes: int) -> torch.Tensor",
         description="把类别下标列表转换为独热编码矩阵。下标均在合法范围内。",
-        reference=lambda indices, num_classes: np.eye(num_classes, dtype=int)[indices],
+        reference=lambda indices, num_classes: torch.nn.functional.one_hot(
+            torch.as_tensor(indices, dtype=torch.long), num_classes=num_classes
+        ),
         raw_cases=[
             case([[0, 2, 1], 3]),
             case([[1], 4]),
@@ -395,17 +767,17 @@ def get_seed_problems() -> list[dict[str, Any]]:
             case([[0], 1]),
             case([[4, 1, 4], 5]),
         ],
-        imports=py_imports(),
-        solution_code="import numpy as np\n\ndef one_hot(indices, num_classes):\n    return np.eye(num_classes, dtype=int)[indices]\n",
-        explanation="构造单位矩阵后按类别下标取行，是独热编码最直接的 NumPy 写法。",
-        constraints=["0 <= index < num_classes", "num_classes >= 1", "返回 np.ndarray"],
+        imports=torch_imports(),
+        solution_code="import torch\nimport torch.nn.functional as F\n\ndef one_hot(indices, num_classes):\n    indices = torch.as_tensor(indices, dtype=torch.long)\n    return F.one_hot(indices, num_classes=num_classes)\n",
+        explanation="先把类别下标转换为 LongTensor，再使用 torch.nn.functional.one_hot 构造独热编码。",
+        constraints=["0 <= index < num_classes", "num_classes >= 1", "返回 torch.Tensor"],
     )
 
     add(
         slug="batch-gather",
         title="批量索引",
         difficulty="中等",
-        category="Python 与 NumPy 基础",
+        category="Python 与 PyTorch 基础",
         function_name="batch_gather",
         signature="def batch_gather(matrix: list[list[float]], indices: list[int]) -> list[float]",
         description="给定二维矩阵和与行数相同的列下标列表，返回每一行对应列的元素。",
@@ -430,7 +802,7 @@ def get_seed_problems() -> list[dict[str, Any]]:
         slug="sliding-window-sum",
         title="滑动窗口求和",
         difficulty="简单",
-        category="Python 与 NumPy 基础",
+        category="Python 与 PyTorch 基础",
         function_name="sliding_window_sum",
         signature="def sliding_window_sum(values: list[float], window: int) -> list[float]",
         description="返回长度为 window 的连续窗口和。若 window 非法或大于数组长度，返回空列表。",
@@ -763,9 +1135,9 @@ def get_seed_problems() -> list[dict[str, Any]]:
         difficulty="简单",
         category="深度学习基础",
         function_name="relu",
-        signature="def relu(x: Any) -> np.ndarray",
+        signature="def relu(x: Any) -> torch.Tensor",
         description="实现 ReLU：逐元素返回 max(x, 0)。输入可以是一维或二维列表。",
-        reference=lambda x: np.maximum(np.asarray(x, dtype=float), 0),
+        reference=lambda x: torch.relu(torch.as_tensor(x, dtype=torch.float64)),
         raw_cases=[
             case([[-1, 0, 2]]),
             case([[[1, -2], [3, -4]]]),
@@ -776,10 +1148,10 @@ def get_seed_problems() -> list[dict[str, Any]]:
             case([[10]]),
             case([[[-1.0], [2.0]]]),
         ],
-        imports=py_imports(),
-        solution_code="import numpy as np\n\ndef relu(x):\n    return np.maximum(np.asarray(x, dtype=float), 0)\n",
+        imports=torch_imports(),
+        solution_code="import torch\n\ndef relu(x):\n    return torch.relu(torch.as_tensor(x, dtype=torch.float64))\n",
         explanation="ReLU 会截断负数并保留非负数。",
-        constraints=["返回 np.ndarray", "支持任意可转成数组的输入"],
+        constraints=["返回 torch.Tensor", "支持任意可转成 Tensor 的输入"],
     )
 
     add(
@@ -788,9 +1160,9 @@ def get_seed_problems() -> list[dict[str, Any]]:
         difficulty="简单",
         category="深度学习基础",
         function_name="sigmoid",
-        signature="def sigmoid(x: Any) -> np.ndarray",
-        description="实现逐元素 Sigmoid 激活函数，返回 NumPy 数组。",
-        reference=lambda x: 1 / (1 + np.exp(-np.asarray(x, dtype=float))),
+        signature="def sigmoid(x: Any) -> torch.Tensor",
+        description="使用 PyTorch 实现逐元素 Sigmoid 激活函数。",
+        reference=lambda x: torch.sigmoid(torch.as_tensor(x, dtype=torch.float64)),
         raw_cases=[
             case([[-1, 0, 1]]),
             case([[[1, -2], [3, -4]]]),
@@ -801,17 +1173,14 @@ def get_seed_problems() -> list[dict[str, Any]]:
             case([[5]]),
             case([[[-1.0], [2.0]]]),
         ],
-        imports=py_imports(),
-        solution_code="import numpy as np\n\ndef sigmoid(x):\n    arr = np.asarray(x, dtype=float)\n    return 1 / (1 + np.exp(-arr))\n",
+        imports=torch_imports(),
+        solution_code="import torch\n\ndef sigmoid(x):\n    return torch.sigmoid(torch.as_tensor(x, dtype=torch.float64))\n",
         explanation="Sigmoid 将实数映射到 0 到 1 之间。",
-        constraints=["返回 np.ndarray", "误差容忍 1e-6"],
+        constraints=["返回 torch.Tensor", "误差容忍 1e-6"],
     )
 
-    def ref_softmax_2d(logits: Any) -> np.ndarray:
-        arr = np.asarray(logits, dtype=float)
-        shifted = arr - np.max(arr, axis=1, keepdims=True)
-        exps = np.exp(shifted)
-        return exps / np.sum(exps, axis=1, keepdims=True)
+    def ref_softmax_2d(logits: Any) -> torch.Tensor:
+        return torch.softmax(torch.as_tensor(logits, dtype=torch.float64), dim=1)
 
     add(
         slug="row-wise-softmax",
@@ -819,7 +1188,7 @@ def get_seed_problems() -> list[dict[str, Any]]:
         difficulty="中等",
         category="深度学习基础",
         function_name="softmax_2d",
-        signature="def softmax_2d(logits: Any) -> np.ndarray",
+        signature="def softmax_2d(logits: Any) -> torch.Tensor",
         description="对二维 logits 的每一行分别计算稳定版 Softmax。",
         reference=ref_softmax_2d,
         raw_cases=[
@@ -832,15 +1201,16 @@ def get_seed_problems() -> list[dict[str, Any]]:
             case([[[10, 0, -10], [0, 0, 0]]]),
             case([[[1, 2]]]),
         ],
-        imports=py_imports(),
-        solution_code="import numpy as np\n\ndef softmax_2d(logits):\n    arr = np.asarray(logits, dtype=float)\n    shifted = arr - np.max(arr, axis=1, keepdims=True)\n    exps = np.exp(shifted)\n    return exps / np.sum(exps, axis=1, keepdims=True)\n",
-        explanation="行级最大值需要 keepdims=True，方便广播回原矩阵形状。",
+        imports=torch_imports(),
+        solution_code="import torch\n\ndef softmax_2d(logits):\n    return torch.softmax(torch.as_tensor(logits, dtype=torch.float64), dim=1)\n",
+        explanation="使用 torch.softmax 并指定 dim=1，让每一行独立归一化。",
         constraints=["输入为二维数组", "误差容忍 1e-6"],
     )
 
     def ref_ce(logits: Any, labels: list[int]) -> float:
-        probs = ref_softmax_2d(logits)
-        return float(-np.mean(np.log(probs[np.arange(len(labels)), labels] + 1e-12)))
+        logits_tensor = torch.as_tensor(logits, dtype=torch.float64)
+        labels_tensor = torch.as_tensor(labels, dtype=torch.long)
+        return float(torch.nn.functional.cross_entropy(logits_tensor, labels_tensor))
 
     add(
         slug="cross-entropy-loss",
@@ -861,9 +1231,9 @@ def get_seed_problems() -> list[dict[str, Any]]:
             case([[[1, 2], [3, 4], [5, 6]], [1, 1, 0]]),
             case([[[1000, 999]], [0]]),
         ],
-        imports=py_imports(),
-        solution_code="import numpy as np\n\ndef cross_entropy_loss(logits, labels):\n    arr = np.asarray(logits, dtype=float)\n    shifted = arr - np.max(arr, axis=1, keepdims=True)\n    exps = np.exp(shifted)\n    probs = exps / np.sum(exps, axis=1, keepdims=True)\n    return float(-np.mean(np.log(probs[np.arange(len(labels)), labels] + 1e-12)))\n",
-        explanation="交叉熵只取真实类别的概率，先做稳定 softmax 再求负对数平均。",
+        imports=torch_imports(),
+        solution_code="import torch\nimport torch.nn.functional as F\n\ndef cross_entropy_loss(logits, labels):\n    logits = torch.as_tensor(logits, dtype=torch.float64)\n    labels = torch.as_tensor(labels, dtype=torch.long)\n    return float(F.cross_entropy(logits, labels))\n",
+        explanation="直接使用 PyTorch 的 cross_entropy 处理原始 logits，它内部使用数值稳定的 LogSoftmax 与 NLLLoss。",
         constraints=["logits 为二维数组", "labels 长度等于 batch size", "误差容忍 1e-6"],
     )
 
@@ -875,7 +1245,9 @@ def get_seed_problems() -> list[dict[str, Any]]:
         function_name="mse_loss",
         signature="def mse_loss(y_pred: Any, y_true: Any) -> float",
         description="计算预测值和真实值之间的平均平方误差。",
-        reference=lambda y_pred, y_true: float(np.mean((np.asarray(y_pred, dtype=float) - np.asarray(y_true, dtype=float)) ** 2)),
+        reference=lambda y_pred, y_true: float(
+            torch.mean((torch.as_tensor(y_pred, dtype=torch.float64) - torch.as_tensor(y_true, dtype=torch.float64)) ** 2)
+        ),
         raw_cases=[
             case([[1, 2, 3], [1, 2, 4]]),
             case([[0], [1]]),
@@ -886,8 +1258,8 @@ def get_seed_problems() -> list[dict[str, Any]]:
             case([[10], [7]]),
             case([[[0.1, 0.2]], [[0.1, 0.4]]]),
         ],
-        imports=py_imports(),
-        solution_code="import numpy as np\n\ndef mse_loss(y_pred, y_true):\n    return float(np.mean((np.asarray(y_pred, dtype=float) - np.asarray(y_true, dtype=float)) ** 2))\n",
+        imports=torch_imports(),
+        solution_code="import torch\n\ndef mse_loss(y_pred, y_true):\n    pred = torch.as_tensor(y_pred, dtype=torch.float64)\n    true = torch.as_tensor(y_true, dtype=torch.float64)\n    return float(torch.mean((pred - true) ** 2))\n",
         explanation="MSE 是所有元素平方误差的平均值。",
         constraints=["y_pred 与 y_true 可广播到相同形状", "误差容忍 1e-6"],
     )
@@ -898,9 +1270,11 @@ def get_seed_problems() -> list[dict[str, Any]]:
         difficulty="中等",
         category="深度学习基础",
         function_name="dropout_train",
-        signature="def dropout_train(x: Any, p: float, mask: Any) -> np.ndarray",
+        signature="def dropout_train(x: Any, p: float, mask: Any) -> torch.Tensor",
         description="实现训练模式下的 inverted dropout：输出 x * mask / (1-p)。mask 由题目给定，避免随机性。",
-        reference=lambda x, p, mask: np.asarray(x, dtype=float) * np.asarray(mask, dtype=float) / (1 - p),
+        reference=lambda x, p, mask: torch.as_tensor(x, dtype=torch.float64)
+        * torch.as_tensor(mask, dtype=torch.float64)
+        / (1 - p),
         raw_cases=[
             case([[1, 2, 3], 0.5, [1, 0, 1]]),
             case([[[1, 2], [3, 4]], 0.25, [[1, 1], [0, 1]]]),
@@ -911,17 +1285,17 @@ def get_seed_problems() -> list[dict[str, Any]]:
             case([[5, 6, 7], 0.75, [1, 1, 0]]),
             case([[1], 0.5, [0]]),
         ],
-        imports=py_imports(),
-        solution_code="import numpy as np\n\ndef dropout_train(x, p, mask):\n    return np.asarray(x, dtype=float) * np.asarray(mask, dtype=float) / (1 - p)\n",
+        imports=torch_imports(),
+        solution_code="import torch\n\ndef dropout_train(x, p, mask):\n    x = torch.as_tensor(x, dtype=torch.float64)\n    mask = torch.as_tensor(mask, dtype=torch.float64)\n    return x * mask / (1 - p)\n",
         explanation="inverted dropout 在训练时缩放保留的激活，使推理时无需额外缩放。",
         constraints=["0 <= p < 1", "mask 与 x 形状一致或可广播"],
     )
 
-    def ref_batch_norm(x: Any, gamma: Any, beta: Any, eps: float = 1e-5) -> np.ndarray:
-        arr = np.asarray(x, dtype=float)
-        mean = arr.mean(axis=0, keepdims=True)
-        var = arr.var(axis=0, keepdims=True)
-        return (arr - mean) / np.sqrt(var + eps) * np.asarray(gamma) + np.asarray(beta)
+    def ref_batch_norm(x: Any, gamma: Any, beta: Any, eps: float = 1e-5) -> torch.Tensor:
+        arr = torch.as_tensor(x, dtype=torch.float64)
+        mean = arr.mean(dim=0, keepdim=True)
+        var = arr.var(dim=0, correction=0, keepdim=True)
+        return (arr - mean) / torch.sqrt(var + eps) * torch.as_tensor(gamma) + torch.as_tensor(beta)
 
     add(
         slug="batch-norm-forward",
@@ -929,7 +1303,7 @@ def get_seed_problems() -> list[dict[str, Any]]:
         difficulty="中等",
         category="深度学习基础",
         function_name="batch_norm_forward",
-        signature="def batch_norm_forward(x: Any, gamma: Any, beta: Any, eps: float = 1e-5) -> np.ndarray",
+        signature="def batch_norm_forward(x: Any, gamma: Any, beta: Any, eps: float = 1e-5) -> torch.Tensor",
         description="对二维输入按特征维度执行 BatchNorm 前向计算，使用当前 batch 的均值和方差。",
         reference=ref_batch_norm,
         raw_cases=[
@@ -942,17 +1316,17 @@ def get_seed_problems() -> list[dict[str, Any]]:
             case([[[10], [20], [30]], [1], [0]]),
             case([[[0, 0], [0, 1]], [1, 1], [0, 0], 1e-3]),
         ],
-        imports=py_imports(),
-        solution_code="import numpy as np\n\ndef batch_norm_forward(x, gamma, beta, eps=1e-5):\n    arr = np.asarray(x, dtype=float)\n    mean = arr.mean(axis=0, keepdims=True)\n    var = arr.var(axis=0, keepdims=True)\n    return (arr - mean) / np.sqrt(var + eps) * np.asarray(gamma) + np.asarray(beta)\n",
+        imports=torch_imports(),
+        solution_code="import torch\n\ndef batch_norm_forward(x, gamma, beta, eps=1e-5):\n    x = torch.as_tensor(x, dtype=torch.float64)\n    gamma = torch.as_tensor(gamma, dtype=x.dtype)\n    beta = torch.as_tensor(beta, dtype=x.dtype)\n    mean = x.mean(dim=0, keepdim=True)\n    var = x.var(dim=0, correction=0, keepdim=True)\n    return (x - mean) / torch.sqrt(var + eps) * gamma + beta\n",
         explanation="BatchNorm 在 batch 维度上统计每个特征的均值和方差，再应用缩放和平移。",
         constraints=["x 为二维数组", "gamma、beta 长度等于特征数", "误差容忍 1e-6"],
     )
 
-    def ref_layer_norm(x: Any, gamma: Any, beta: Any, eps: float = 1e-5) -> np.ndarray:
-        arr = np.asarray(x, dtype=float)
-        mean = arr.mean(axis=1, keepdims=True)
-        var = arr.var(axis=1, keepdims=True)
-        return (arr - mean) / np.sqrt(var + eps) * np.asarray(gamma) + np.asarray(beta)
+    def ref_layer_norm(x: Any, gamma: Any, beta: Any, eps: float = 1e-5) -> torch.Tensor:
+        arr = torch.as_tensor(x, dtype=torch.float64)
+        mean = arr.mean(dim=1, keepdim=True)
+        var = arr.var(dim=1, correction=0, keepdim=True)
+        return (arr - mean) / torch.sqrt(var + eps) * torch.as_tensor(gamma) + torch.as_tensor(beta)
 
     add(
         slug="layer-norm-forward",
@@ -960,7 +1334,7 @@ def get_seed_problems() -> list[dict[str, Any]]:
         difficulty="中等",
         category="深度学习基础",
         function_name="layer_norm_forward",
-        signature="def layer_norm_forward(x: Any, gamma: Any, beta: Any, eps: float = 1e-5) -> np.ndarray",
+        signature="def layer_norm_forward(x: Any, gamma: Any, beta: Any, eps: float = 1e-5) -> torch.Tensor",
         description="对二维输入按每个样本的特征维度执行 LayerNorm 前向计算。",
         reference=ref_layer_norm,
         raw_cases=[
@@ -973,8 +1347,8 @@ def get_seed_problems() -> list[dict[str, Any]]:
             case([[[10, 20, 30]], [1, 1, 1], [0, 0, 0]]),
             case([[[0, 0], [0, 1]], [1, 1], [0, 0], 1e-3]),
         ],
-        imports=py_imports(),
-        solution_code="import numpy as np\n\ndef layer_norm_forward(x, gamma, beta, eps=1e-5):\n    arr = np.asarray(x, dtype=float)\n    mean = arr.mean(axis=1, keepdims=True)\n    var = arr.var(axis=1, keepdims=True)\n    return (arr - mean) / np.sqrt(var + eps) * np.asarray(gamma) + np.asarray(beta)\n",
+        imports=torch_imports(),
+        solution_code="import torch\n\ndef layer_norm_forward(x, gamma, beta, eps=1e-5):\n    x = torch.as_tensor(x, dtype=torch.float64)\n    gamma = torch.as_tensor(gamma, dtype=x.dtype)\n    beta = torch.as_tensor(beta, dtype=x.dtype)\n    mean = x.mean(dim=1, keepdim=True)\n    var = x.var(dim=1, correction=0, keepdim=True)\n    return (x - mean) / torch.sqrt(var + eps) * gamma + beta\n",
         explanation="LayerNorm 的统计维度在样本内部，与 batch size 无关。",
         constraints=["x 为二维数组", "gamma、beta 长度等于特征数", "误差容忍 1e-6"],
     )
@@ -985,11 +1359,12 @@ def get_seed_problems() -> list[dict[str, Any]]:
         difficulty="中等",
         category="深度学习基础",
         function_name="conv1d_valid",
-        signature="def conv1d_valid(x: list[float], kernel: list[float]) -> list[float]",
-        description="实现 stride=1、无 padding 的一维有效卷积。按深度学习中的互相关写法，不翻转 kernel。",
-        reference=lambda x, kernel: [
-            sum(x[i + j] * kernel[j] for j in range(len(kernel))) for i in range(len(x) - len(kernel) + 1)
-        ],
+        signature="def conv1d_valid(x: Any, kernel: Any) -> torch.Tensor",
+        description="使用 PyTorch 实现 stride=1、无 padding 的一维有效卷积。按深度学习中的互相关写法，不翻转 kernel。",
+        reference=lambda x, kernel: torch.nn.functional.conv1d(
+            torch.as_tensor(x, dtype=torch.float64).view(1, 1, -1),
+            torch.as_tensor(kernel, dtype=torch.float64).view(1, 1, -1),
+        ).flatten(),
         raw_cases=[
             case([[1, 2, 3], [1, 1]]),
             case([[1, 2, 3], [1, 0, -1]]),
@@ -1000,9 +1375,9 @@ def get_seed_problems() -> list[dict[str, Any]]:
             case([[2, 4, 6, 8], [0, 1]]),
             case([[3, 2, 1], [-1]]),
         ],
-        imports=py_imports(),
-        solution_code="def conv1d_valid(x, kernel):\n    return [sum(x[i + j] * kernel[j] for j in range(len(kernel))) for i in range(len(x) - len(kernel) + 1)]\n",
-        explanation="深度学习框架中的 Conv 通常实现互相关，本题不翻转卷积核。",
+        imports=torch_imports(),
+        solution_code="import torch\nimport torch.nn.functional as F\n\ndef conv1d_valid(x, kernel):\n    x = torch.as_tensor(x, dtype=torch.float64).view(1, 1, -1)\n    kernel = torch.as_tensor(kernel, dtype=torch.float64).view(1, 1, -1)\n    return F.conv1d(x, kernel).flatten()\n",
+        explanation="把序列和卷积核补成 (N,C,L) 与 (C_out,C_in,K) 形状，再调用 F.conv1d。",
         constraints=["1 <= len(kernel) <= len(x)", "stride 固定为 1"],
     )
 
@@ -1012,9 +1387,11 @@ def get_seed_problems() -> list[dict[str, Any]]:
         difficulty="简单",
         category="深度学习基础",
         function_name="embedding_lookup",
-        signature="def embedding_lookup(embedding: Any, indices: Any) -> np.ndarray",
+        signature="def embedding_lookup(embedding: Any, indices: Any) -> torch.Tensor",
         description="给定 embedding 矩阵和下标，返回对应行。indices 可以是一维或二维列表。",
-        reference=lambda embedding, indices: np.asarray(embedding, dtype=float)[np.asarray(indices, dtype=int)],
+        reference=lambda embedding, indices: torch.as_tensor(embedding, dtype=torch.float64)[
+            torch.as_tensor(indices, dtype=torch.long)
+        ],
         raw_cases=[
             case([[[1, 2], [3, 4], [5, 6]], [0, 2]]),
             case([[[1], [2], [3]], [[0, 1], [2, 0]]]),
@@ -1025,10 +1402,10 @@ def get_seed_problems() -> list[dict[str, Any]]:
             case([[[1.5, 2.5], [3.5, 4.5]], [1]]),
             case([[[0, 0], [1, 1], [2, 2]], [[2, 1], [0, 2]]]),
         ],
-        imports=py_imports(),
-        solution_code="import numpy as np\n\ndef embedding_lookup(embedding, indices):\n    return np.asarray(embedding, dtype=float)[np.asarray(indices, dtype=int)]\n",
+        imports=torch_imports(),
+        solution_code="import torch\n\ndef embedding_lookup(embedding, indices):\n    table = torch.as_tensor(embedding, dtype=torch.float64)\n    indices = torch.as_tensor(indices, dtype=torch.long)\n    return table[indices]\n",
         explanation="Embedding 本质是按 token id 从参数矩阵中取行。",
-        constraints=["下标合法", "返回 np.ndarray"],
+        constraints=["下标合法", "返回 torch.Tensor"],
     )
 
     # PyTorch 基础
@@ -1312,11 +1689,12 @@ def dataset_snapshot(values: list[Any]) -> dict[str, Any]:
     )
 
     # Attention 与 Transformer
-    def ref_attention(q: Any, k: Any, v: Any) -> np.ndarray:
-        q_arr, k_arr, v_arr = np.asarray(q, dtype=float), np.asarray(k, dtype=float), np.asarray(v, dtype=float)
-        scores = q_arr @ k_arr.T / math.sqrt(q_arr.shape[-1])
-        probs = ref_softmax_2d(scores)
-        return probs @ v_arr
+    def ref_attention(q: Any, k: Any, v: Any) -> torch.Tensor:
+        q_arr = torch.as_tensor(q, dtype=torch.float64)
+        k_arr = torch.as_tensor(k, dtype=torch.float64)
+        v_arr = torch.as_tensor(v, dtype=torch.float64)
+        scores = q_arr @ k_arr.transpose(-2, -1) / math.sqrt(q_arr.shape[-1])
+        return torch.softmax(scores, dim=-1) @ v_arr
 
     add(
         slug="scaled-dot-product-attention",
@@ -1324,7 +1702,7 @@ def dataset_snapshot(values: list[Any]) -> dict[str, Any]:
         difficulty="困难",
         category="Attention 与 Transformer",
         function_name="scaled_dot_product_attention",
-        signature="def scaled_dot_product_attention(q: Any, k: Any, v: Any) -> np.ndarray",
+        signature="def scaled_dot_product_attention(q: Any, k: Any, v: Any) -> torch.Tensor",
         description="实现单头 scaled dot-product attention：softmax(QK^T/sqrt(d))V。",
         reference=ref_attention,
         raw_cases=[
@@ -1337,16 +1715,16 @@ def dataset_snapshot(values: list[Any]) -> dict[str, Any]:
             case([[[3, 4]], [[3, 4], [4, 3]], [[1, 1], [2, 2]]]),
             case([[[1]], [[1], [2]], [[10], [20]]]),
         ],
-        imports=py_imports(),
-        solution_code="import math\nimport numpy as np\n\ndef scaled_dot_product_attention(q, k, v):\n    q = np.asarray(q, dtype=float)\n    k = np.asarray(k, dtype=float)\n    v = np.asarray(v, dtype=float)\n    scores = q @ k.T / math.sqrt(q.shape[-1])\n    shifted = scores - np.max(scores, axis=1, keepdims=True)\n    probs = np.exp(shifted) / np.sum(np.exp(shifted), axis=1, keepdims=True)\n    return probs @ v\n",
+        imports=torch_imports(),
+        solution_code="import math\nimport torch\n\ndef scaled_dot_product_attention(q, k, v):\n    q = torch.as_tensor(q, dtype=torch.float64)\n    k = torch.as_tensor(k, dtype=torch.float64)\n    v = torch.as_tensor(v, dtype=torch.float64)\n    scores = q @ k.transpose(-2, -1) / math.sqrt(q.shape[-1])\n    return torch.softmax(scores, dim=-1) @ v\n",
         explanation="注意力先计算缩放点积得分，再按 key 维度 softmax，最后对 value 加权求和。",
         constraints=["q、k、v 为二维数组", "k 与 v 的序列长度一致", "误差容忍 1e-6"],
     )
 
-    def ref_masked(scores: Any, mask: Any) -> np.ndarray:
-        arr = np.asarray(scores, dtype=float).copy()
-        arr[np.asarray(mask, dtype=bool)] = -1e30
-        return ref_softmax_2d(arr)
+    def ref_masked(scores: Any, mask: Any) -> torch.Tensor:
+        arr = torch.as_tensor(scores, dtype=torch.float64)
+        bool_mask = torch.as_tensor(mask, dtype=torch.bool)
+        return torch.softmax(arr.masked_fill(bool_mask, float("-inf")), dim=-1)
 
     add(
         slug="attention-mask-softmax",
@@ -1354,7 +1732,7 @@ def dataset_snapshot(values: list[Any]) -> dict[str, Any]:
         difficulty="中等",
         category="Attention 与 Transformer",
         function_name="attention_with_mask",
-        signature="def attention_with_mask(scores: Any, mask: Any) -> np.ndarray",
+        signature="def attention_with_mask(scores: Any, mask: Any) -> torch.Tensor",
         description="对 attention scores 做 softmax，mask 为 True 的位置不可见，概率应接近 0。",
         reference=ref_masked,
         raw_cases=[
@@ -1367,20 +1745,19 @@ def dataset_snapshot(values: list[Any]) -> dict[str, Any]:
             case([[[3, 4], [5, 6]], [[False, False], [False, True]]]),
             case([[[0, 1]], [[True, False]]]),
         ],
-        imports=py_imports(),
-        solution_code="import numpy as np\n\ndef attention_with_mask(scores, mask):\n    arr = np.asarray(scores, dtype=float).copy()\n    arr[np.asarray(mask, dtype=bool)] = -1e30\n    shifted = arr - np.max(arr, axis=1, keepdims=True)\n    exps = np.exp(shifted)\n    return exps / np.sum(exps, axis=1, keepdims=True)\n",
-        explanation="被 mask 的位置用极小值替代，再做 softmax。",
+        imports=torch_imports(),
+        solution_code="import torch\n\ndef attention_with_mask(scores, mask):\n    scores = torch.as_tensor(scores, dtype=torch.float64)\n    mask = torch.as_tensor(mask, dtype=torch.bool)\n    return torch.softmax(scores.masked_fill(mask, float('-inf')), dim=-1)\n",
+        explanation="用 masked_fill 把不可见位置设为负无穷，再沿 key 维执行 Softmax。",
         constraints=["scores 与 mask 形状一致", "每行至少一个未 mask 位置"],
     )
 
-    def ref_pos(length: int, dim: int) -> np.ndarray:
-        pe = np.zeros((length, dim), dtype=float)
-        for pos in range(length):
-            for i in range(0, dim, 2):
-                div = 10000 ** (i / dim)
-                pe[pos, i] = math.sin(pos / div)
-                if i + 1 < dim:
-                    pe[pos, i + 1] = math.cos(pos / div)
+    def ref_pos(length: int, dim: int) -> torch.Tensor:
+        pe = torch.zeros((length, dim), dtype=torch.float64)
+        positions = torch.arange(length, dtype=torch.float64).unsqueeze(1)
+        even_dims = torch.arange(0, dim, 2, dtype=torch.float64)
+        angles = positions / torch.pow(10000.0, even_dims / dim)
+        pe[:, 0::2] = torch.sin(angles)
+        pe[:, 1::2] = torch.cos(angles[:, : pe[:, 1::2].shape[1]])
         return pe
 
     add(
@@ -1389,7 +1766,7 @@ def dataset_snapshot(values: list[Any]) -> dict[str, Any]:
         difficulty="困难",
         category="Attention 与 Transformer",
         function_name="positional_encoding",
-        signature="def positional_encoding(length: int, dim: int) -> np.ndarray",
+        signature="def positional_encoding(length: int, dim: int) -> torch.Tensor",
         description="实现 Transformer 经典正弦位置编码，偶数维使用 sin，奇数维使用 cos。",
         reference=ref_pos,
         raw_cases=[
@@ -1402,17 +1779,17 @@ def dataset_snapshot(values: list[Any]) -> dict[str, Any]:
             case([2, 5]),
             case([6, 4]),
         ],
-        imports=py_imports(),
-        solution_code="import math\nimport numpy as np\n\ndef positional_encoding(length, dim):\n    pe = np.zeros((length, dim), dtype=float)\n    for pos in range(length):\n        for i in range(0, dim, 2):\n            div = 10000 ** (i / dim)\n            pe[pos, i] = math.sin(pos / div)\n            if i + 1 < dim:\n                pe[pos, i + 1] = math.cos(pos / div)\n    return pe\n",
-        explanation="位置编码用不同频率的 sin/cos 表示绝对位置，奇偶维公式不同。",
+        imports=torch_imports(),
+        solution_code="import torch\n\ndef positional_encoding(length, dim):\n    pe = torch.zeros((length, dim), dtype=torch.float64)\n    positions = torch.arange(length, dtype=torch.float64).unsqueeze(1)\n    even_dims = torch.arange(0, dim, 2, dtype=torch.float64)\n    angles = positions / torch.pow(10000.0, even_dims / dim)\n    pe[:, 0::2] = torch.sin(angles)\n    pe[:, 1::2] = torch.cos(angles[:, :pe[:, 1::2].shape[1]])\n    return pe\n",
+        explanation="用 PyTorch 广播一次构造所有位置与频率的角度，再分别把 sin/cos 写入偶数列和奇数列。",
         constraints=["length >= 0", "dim >= 1", "误差容忍 1e-6"],
     )
 
-    def ref_split_heads(x: Any, num_heads: int) -> np.ndarray:
-        arr = np.asarray(x, dtype=float)
+    def ref_split_heads(x: Any, num_heads: int) -> torch.Tensor:
+        arr = torch.as_tensor(x, dtype=torch.float64)
         batch, seq, dim = arr.shape
         head_dim = dim // num_heads
-        return arr.reshape(batch, seq, num_heads, head_dim).transpose(0, 2, 1, 3)
+        return arr.reshape(batch, seq, num_heads, head_dim).permute(0, 2, 1, 3)
 
     add(
         slug="split-heads",
@@ -1420,7 +1797,7 @@ def dataset_snapshot(values: list[Any]) -> dict[str, Any]:
         difficulty="中等",
         category="Attention 与 Transformer",
         function_name="split_heads",
-        signature="def split_heads(x: Any, num_heads: int) -> np.ndarray",
+        signature="def split_heads(x: Any, num_heads: int) -> torch.Tensor",
         description="把形状 (batch, seq, dim) 的张量拆成 (batch, heads, seq, head_dim)。",
         reference=ref_split_heads,
         raw_cases=[
@@ -1433,8 +1810,8 @@ def dataset_snapshot(values: list[Any]) -> dict[str, Any]:
             case([[[[1, 2], [3, 4], [5, 6]]], 2]),
             case([[[[1, 2, 3, 4], [5, 6, 7, 8]], [[9, 10, 11, 12], [13, 14, 15, 16]]], 2]),
         ],
-        imports=py_imports(),
-        solution_code="import numpy as np\n\ndef split_heads(x, num_heads):\n    arr = np.asarray(x, dtype=float)\n    batch, seq, dim = arr.shape\n    head_dim = dim // num_heads\n    return arr.reshape(batch, seq, num_heads, head_dim).transpose(0, 2, 1, 3)\n",
+        imports=torch_imports(),
+        solution_code="import torch\n\ndef split_heads(x, num_heads):\n    x = torch.as_tensor(x, dtype=torch.float64)\n    batch, seq, dim = x.shape\n    head_dim = dim // num_heads\n    return x.reshape(batch, seq, num_heads, head_dim).permute(0, 2, 1, 3)\n",
         explanation="先 reshape 出 heads 维度，再转置到注意力计算常用的维度顺序。",
         constraints=["dim 能被 num_heads 整除", "输入为三维数组"],
     )
@@ -1445,11 +1822,11 @@ def dataset_snapshot(values: list[Any]) -> dict[str, Any]:
         difficulty="中等",
         category="Attention 与 Transformer",
         function_name="combine_heads",
-        signature="def combine_heads(x: Any) -> np.ndarray",
+        signature="def combine_heads(x: Any) -> torch.Tensor",
         description="把形状 (batch, heads, seq, head_dim) 的张量合并回 (batch, seq, heads*head_dim)。",
-        reference=lambda x: np.asarray(x, dtype=float).transpose(0, 2, 1, 3).reshape(
-            np.asarray(x).shape[0], np.asarray(x).shape[2], np.asarray(x).shape[1] * np.asarray(x).shape[3]
-        ),
+        reference=lambda x: torch.as_tensor(x, dtype=torch.float64)
+        .permute(0, 2, 1, 3)
+        .reshape(len(x), len(x[0][0]), len(x[0]) * len(x[0][0][0])),
         raw_cases=[
             case([[[[[1, 2]], [[3, 4]]]]]),
             case([[[[[1], [2]], [[3], [4]]]]]),
@@ -1460,8 +1837,8 @@ def dataset_snapshot(values: list[Any]) -> dict[str, Any]:
             case([[[[[1], [2], [3]], [[4], [5], [6]]]]]),
             case([[[[[1, 2, 3]], [[4, 5, 6]]]]]),
         ],
-        imports=py_imports(),
-        solution_code="import numpy as np\n\ndef combine_heads(x):\n    arr = np.asarray(x, dtype=float)\n    batch, heads, seq, head_dim = arr.shape\n    return arr.transpose(0, 2, 1, 3).reshape(batch, seq, heads * head_dim)\n",
+        imports=torch_imports(),
+        solution_code="import torch\n\ndef combine_heads(x):\n    x = torch.as_tensor(x, dtype=torch.float64)\n    batch, heads, seq, head_dim = x.shape\n    return x.permute(0, 2, 1, 3).contiguous().reshape(batch, seq, heads * head_dim)\n",
         explanation="拆头的逆操作是先把 seq 放回第二维，再合并 heads 和 head_dim。",
         constraints=["输入为四维数组"],
     )
@@ -1474,7 +1851,7 @@ def dataset_snapshot(values: list[Any]) -> dict[str, Any]:
         function_name="greedy_decode_step",
         signature="def greedy_decode_step(logits: Any) -> list[int]",
         description="给定 batch x vocab 的 logits，返回每个样本最大 logit 的下标。",
-        reference=lambda logits: np.asarray(logits).argmax(axis=1).astype(int).tolist(),
+        reference=lambda logits: torch.as_tensor(logits).argmax(dim=1).tolist(),
         raw_cases=[
             case([[[1, 3, 2], [0, -1, 5]]]),
             case([[[0, 0]]]),
@@ -1485,10 +1862,10 @@ def dataset_snapshot(values: list[Any]) -> dict[str, Any]:
             case([[[1, 1, 0]]]),
             case([[[2, 4], [4, 2], [3, 3]]]),
         ],
-        imports=py_imports(),
-        solution_code="import numpy as np\n\ndef greedy_decode_step(logits):\n    return np.asarray(logits).argmax(axis=1).astype(int).tolist()\n",
+        imports=torch_imports(),
+        solution_code="import torch\n\ndef greedy_decode_step(logits):\n    return torch.as_tensor(logits).argmax(dim=1).tolist()\n",
         explanation="贪心解码每一步选择概率或 logit 最大的 token。",
-        constraints=["logits 为二维数组", "并列时 NumPy argmax 返回最小下标"],
+        constraints=["logits 为二维输入", "并列时 torch.argmax 返回最小下标"],
     )
 
     add(
@@ -1516,9 +1893,9 @@ def dataset_snapshot(values: list[Any]) -> dict[str, Any]:
         constraints=["0 <= k", "k 可超过词表大小"],
     )
 
-    def ref_smooth(labels: list[int], num_classes: int, epsilon: float) -> np.ndarray:
+    def ref_smooth(labels: list[int], num_classes: int, epsilon: float) -> torch.Tensor:
         off = epsilon / num_classes
-        arr = np.full((len(labels), num_classes), off, dtype=float)
+        arr = torch.full((len(labels), num_classes), off, dtype=torch.float64)
         for i, label in enumerate(labels):
             arr[i, label] = 1 - epsilon + off
         return arr
@@ -1529,7 +1906,7 @@ def dataset_snapshot(values: list[Any]) -> dict[str, Any]:
         difficulty="中等",
         category="Attention 与 Transformer",
         function_name="label_smoothing",
-        signature="def label_smoothing(labels: list[int], num_classes: int, epsilon: float) -> np.ndarray",
+        signature="def label_smoothing(labels: list[int], num_classes: int, epsilon: float) -> torch.Tensor",
         description="把类别标签转换为 label smoothing 后的分布：真实类为 1-epsilon+epsilon/C，其余为 epsilon/C。",
         reference=ref_smooth,
         raw_cases=[
@@ -1542,23 +1919,17 @@ def dataset_snapshot(values: list[Any]) -> dict[str, Any]:
             case([[1, 0], 2, 0.1]),
             case([[4, 1, 4], 5, 0.2]),
         ],
-        imports=py_imports(),
-        solution_code="import numpy as np\n\ndef label_smoothing(labels, num_classes, epsilon):\n    off = epsilon / num_classes\n    arr = np.full((len(labels), num_classes), off, dtype=float)\n    for i, label in enumerate(labels):\n        arr[i, label] = 1 - epsilon + off\n    return arr\n",
+        imports=torch_imports(),
+        solution_code="import torch\n\ndef label_smoothing(labels, num_classes, epsilon):\n    off = epsilon / num_classes\n    result = torch.full((len(labels), num_classes), off, dtype=torch.float64)\n    if labels:\n        rows = torch.arange(len(labels))\n        result[rows, torch.as_tensor(labels, dtype=torch.long)] += 1 - epsilon\n    return result\n",
         explanation="Label smoothing 会降低真实类别的置信度，同时给其他类别分配少量概率。",
         constraints=["0 <= epsilon <= 1", "标签下标合法", "误差容忍 1e-6"],
     )
 
     # 计算机视觉
-    def ref_conv2d(image: Any, kernel: Any) -> np.ndarray:
-        img = np.asarray(image, dtype=float)
-        ker = np.asarray(kernel, dtype=float)
-        h, w = img.shape
-        kh, kw = ker.shape
-        out = np.zeros((h - kh + 1, w - kw + 1), dtype=float)
-        for i in range(out.shape[0]):
-            for j in range(out.shape[1]):
-                out[i, j] = np.sum(img[i : i + kh, j : j + kw] * ker)
-        return out
+    def ref_conv2d(image: Any, kernel: Any) -> torch.Tensor:
+        img = torch.as_tensor(image, dtype=torch.float64).view(1, 1, len(image), len(image[0]))
+        ker = torch.as_tensor(kernel, dtype=torch.float64).view(1, 1, len(kernel), len(kernel[0]))
+        return torch.nn.functional.conv2d(img, ker).squeeze(0).squeeze(0)
 
     add(
         slug="conv2d-valid",
@@ -1566,8 +1937,8 @@ def dataset_snapshot(values: list[Any]) -> dict[str, Any]:
         difficulty="困难",
         category="计算机视觉",
         function_name="conv2d_valid",
-        signature="def conv2d_valid(image: Any, kernel: Any) -> np.ndarray",
-        description="实现 stride=1、无 padding 的二维有效卷积。按深度学习互相关写法，不翻转 kernel。",
+        signature="def conv2d_valid(image: Any, kernel: Any) -> torch.Tensor",
+        description="使用 PyTorch 实现 stride=1、无 padding 的二维有效卷积。按深度学习互相关写法，不翻转 kernel。",
         reference=ref_conv2d,
         raw_cases=[
             case([[[1, 2], [3, 4]], [[1, 0], [0, 1]]]),
@@ -1579,22 +1950,15 @@ def dataset_snapshot(values: list[Any]) -> dict[str, Any]:
             case([[[2, 4, 6], [8, 10, 12], [14, 16, 18]], [[0, 1], [1, 0]]]),
             case([[[3, 2, 1]], [[-1]]]),
         ],
-        imports=py_imports(),
-        solution_code="import numpy as np\n\ndef conv2d_valid(image, kernel):\n    img = np.asarray(image, dtype=float)\n    ker = np.asarray(kernel, dtype=float)\n    h, w = img.shape\n    kh, kw = ker.shape\n    out = np.zeros((h - kh + 1, w - kw + 1), dtype=float)\n    for i in range(out.shape[0]):\n        for j in range(out.shape[1]):\n            out[i, j] = np.sum(img[i:i + kh, j:j + kw] * ker)\n    return out\n",
-        explanation="二维卷积遍历每个窗口，与 kernel 逐元素相乘后求和。",
-        constraints=["kernel 尺寸不大于 image", "返回 np.ndarray"],
+        imports=torch_imports(),
+        solution_code="import torch\nimport torch.nn.functional as F\n\ndef conv2d_valid(image, kernel):\n    image = torch.as_tensor(image, dtype=torch.float64)[None, None]\n    kernel = torch.as_tensor(kernel, dtype=torch.float64)[None, None]\n    return F.conv2d(image, kernel).squeeze(0).squeeze(0)\n",
+        explanation="把二维输入补成 PyTorch 所需的 (N,C,H,W) 形状，再使用 F.conv2d。",
+        constraints=["kernel 尺寸不大于 image", "返回 torch.Tensor"],
     )
 
-    def ref_pool(image: Any, kernel_size: int, stride: int) -> np.ndarray:
-        img = np.asarray(image, dtype=float)
-        h, w = img.shape
-        out_h = (h - kernel_size) // stride + 1
-        out_w = (w - kernel_size) // stride + 1
-        out = np.zeros((out_h, out_w), dtype=float)
-        for i in range(out_h):
-            for j in range(out_w):
-                out[i, j] = np.max(img[i * stride : i * stride + kernel_size, j * stride : j * stride + kernel_size])
-        return out
+    def ref_pool(image: Any, kernel_size: int, stride: int) -> torch.Tensor:
+        img = torch.as_tensor(image, dtype=torch.float64)[None, None]
+        return torch.nn.functional.max_pool2d(img, kernel_size, stride).squeeze(0).squeeze(0)
 
     add(
         slug="max-pool2d",
@@ -1602,8 +1966,8 @@ def dataset_snapshot(values: list[Any]) -> dict[str, Any]:
         difficulty="中等",
         category="计算机视觉",
         function_name="max_pool2d",
-        signature="def max_pool2d(image: Any, kernel_size: int, stride: int) -> np.ndarray",
-        description="实现单通道二维最大池化，输入为二维数组。",
+        signature="def max_pool2d(image: Any, kernel_size: int, stride: int) -> torch.Tensor",
+        description="使用 PyTorch 实现单通道二维最大池化，输入为二维数组。",
         reference=ref_pool,
         raw_cases=[
             case([[[1, 2], [3, 4]], 2, 1]),
@@ -1615,10 +1979,10 @@ def dataset_snapshot(values: list[Any]) -> dict[str, Any]:
             case([[[2, 4, 6], [8, 10, 12], [14, 16, 18]], 3, 1]),
             case([[[3, 2, 1, 0]], 1, 2]),
         ],
-        imports=py_imports(),
-        solution_code="import numpy as np\n\ndef max_pool2d(image, kernel_size, stride):\n    img = np.asarray(image, dtype=float)\n    h, w = img.shape\n    out_h = (h - kernel_size) // stride + 1\n    out_w = (w - kernel_size) // stride + 1\n    out = np.zeros((out_h, out_w), dtype=float)\n    for i in range(out_h):\n        for j in range(out_w):\n            out[i, j] = np.max(img[i * stride:i * stride + kernel_size, j * stride:j * stride + kernel_size])\n    return out\n",
-        explanation="最大池化在每个窗口中取最大值，stride 控制窗口移动距离。",
-        constraints=["kernel_size >= 1", "stride >= 1", "返回 np.ndarray"],
+        imports=torch_imports(),
+        solution_code="import torch\nimport torch.nn.functional as F\n\ndef max_pool2d(image, kernel_size, stride):\n    image = torch.as_tensor(image, dtype=torch.float64)[None, None]\n    return F.max_pool2d(image, kernel_size, stride).squeeze(0).squeeze(0)\n",
+        explanation="把二维图像补齐 batch 和 channel 维，再调用 F.max_pool2d。",
+        constraints=["kernel_size >= 1", "stride >= 1", "返回 torch.Tensor"],
     )
 
     def ref_iou(a: list[float], b: list[float]) -> float:
@@ -1689,14 +2053,9 @@ def dataset_snapshot(values: list[Any]) -> dict[str, Any]:
         constraints=["boxes 与 scores 长度一致", "返回原始下标列表"],
     )
 
-    def ref_patch(image: Any, patch_size: int) -> np.ndarray:
-        img = np.asarray(image, dtype=float)
-        h, w = img.shape
-        patches = []
-        for i in range(0, h, patch_size):
-            for j in range(0, w, patch_size):
-                patches.append(img[i : i + patch_size, j : j + patch_size].reshape(-1))
-        return np.vstack(patches) if patches else np.empty((0, patch_size * patch_size))
+    def ref_patch(image: Any, patch_size: int) -> torch.Tensor:
+        img = torch.as_tensor(image, dtype=torch.float64)
+        return img.unfold(0, patch_size, patch_size).unfold(1, patch_size, patch_size).contiguous().view(-1, patch_size**2)
 
     add(
         slug="patch-embedding-flatten",
@@ -1704,7 +2063,7 @@ def dataset_snapshot(values: list[Any]) -> dict[str, Any]:
         difficulty="中等",
         category="计算机视觉",
         function_name="patch_embedding_flatten",
-        signature="def patch_embedding_flatten(image: Any, patch_size: int) -> np.ndarray",
+        signature="def patch_embedding_flatten(image: Any, patch_size: int) -> torch.Tensor",
         description="把二维图像按不重叠 patch 切分，并把每个 patch 展平成一行。假设高宽都能被 patch_size 整除。",
         reference=ref_patch,
         raw_cases=[
@@ -1714,13 +2073,13 @@ def dataset_snapshot(values: list[Any]) -> dict[str, Any]:
             case([[[0]], 1]),
             case([[[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16]], 2]),
             case([[[1, 1], [1, 1]], 2]),
-            case([[[2, 4, 6, 8]], 2]),
+            case([[[2, 4, 6, 8], [1, 3, 5, 7]], 2]),
             case([[[3, 2], [1, 0], [5, 4], [7, 6]], 2]),
         ],
-        imports=py_imports(),
-        solution_code="import numpy as np\n\ndef patch_embedding_flatten(image, patch_size):\n    img = np.asarray(image, dtype=float)\n    h, w = img.shape\n    patches = []\n    for i in range(0, h, patch_size):\n        for j in range(0, w, patch_size):\n            patches.append(img[i:i + patch_size, j:j + patch_size].reshape(-1))\n    return np.vstack(patches) if patches else np.empty((0, patch_size * patch_size))\n",
-        explanation="ViT 的 patch embedding 通常先切分 patch，再展平并线性投影。",
-        constraints=["高宽能被 patch_size 整除", "返回二维 np.ndarray"],
+        imports=torch_imports(),
+        solution_code="import torch\n\ndef patch_embedding_flatten(image, patch_size):\n    image = torch.as_tensor(image, dtype=torch.float64)\n    patches = image.unfold(0, patch_size, patch_size).unfold(1, patch_size, patch_size)\n    return patches.contiguous().view(-1, patch_size ** 2)\n",
+        explanation="使用 Tensor.unfold 在高、宽维提取不重叠窗口，再把每个 patch 展平。",
+        constraints=["高宽能被 patch_size 整除", "返回二维 torch.Tensor"],
     )
 
     # 自然语言处理
@@ -1804,18 +2163,12 @@ def dataset_snapshot(values: list[Any]) -> dict[str, Any]:
     )
 
     def ref_seq_ce(logits: Any, labels: Any, pad_id: int) -> float:
-        arr = np.asarray(logits, dtype=float)
-        lab = np.asarray(labels, dtype=int)
-        total = 0.0
-        count = 0
-        for i in range(lab.shape[0]):
-            for j in range(lab.shape[1]):
-                if lab[i, j] == pad_id:
-                    continue
-                probs = ref_softmax_2d(arr[i, j : j + 1])[0]
-                total += -math.log(probs[lab[i, j]] + 1e-12)
-                count += 1
-        return 0.0 if count == 0 else total / count
+        logits_tensor = torch.as_tensor(logits, dtype=torch.float64)
+        labels_tensor = torch.as_tensor(labels, dtype=torch.long)
+        valid = labels_tensor != pad_id
+        if not bool(valid.any()):
+            return 0.0
+        return float(torch.nn.functional.cross_entropy(logits_tensor[valid], labels_tensor[valid]))
 
     add(
         slug="sequence-cross-entropy-ignore-pad",
@@ -1836,9 +2189,9 @@ def dataset_snapshot(values: list[Any]) -> dict[str, Any]:
             case([[[[0, 5], [5, 0], [1, 1]]], [[1, 0, 1]], -1]),
             case([[[[2, 1], [1, 2]]], [[-9, -9]], -9]),
         ],
-        imports=py_imports(),
-        solution_code="import math\nimport numpy as np\n\ndef sequence_cross_entropy(logits, labels, pad_id):\n    arr = np.asarray(logits, dtype=float)\n    lab = np.asarray(labels, dtype=int)\n    total = 0.0\n    count = 0\n    for i in range(lab.shape[0]):\n        for j in range(lab.shape[1]):\n            if lab[i, j] == pad_id:\n                continue\n            row = arr[i, j]\n            shifted = row - np.max(row)\n            probs = np.exp(shifted) / np.sum(np.exp(shifted))\n            total += -math.log(probs[lab[i, j]] + 1e-12)\n            count += 1\n    return 0.0 if count == 0 else total / count\n",
-        explanation="序列任务通常需要忽略 padding 位置，只对有效 token 求平均损失。",
+        imports=torch_imports(),
+        solution_code="import torch\nimport torch.nn.functional as F\n\ndef sequence_cross_entropy(logits, labels, pad_id):\n    logits = torch.as_tensor(logits, dtype=torch.float64)\n    labels = torch.as_tensor(labels, dtype=torch.long)\n    valid = labels != pad_id\n    if not bool(valid.any()):\n        return 0.0\n    return float(F.cross_entropy(logits[valid], labels[valid]))\n",
+        explanation="用布尔 mask 选出非 Padding 的 logits 与标签，再调用 PyTorch 交叉熵。",
         constraints=["logits 为三维数组", "labels 为二维数组", "误差容忍 1e-6"],
     )
 
@@ -1851,7 +2204,7 @@ def dataset_snapshot(values: list[Any]) -> dict[str, Any]:
         function_name="has_nan",
         signature="def has_nan(values: Any) -> bool",
         description="判断输入数组或嵌套列表中是否存在 NaN。",
-        reference=lambda values: bool(np.isnan(np.asarray(values, dtype=float)).any()),
+        reference=lambda values: bool(torch.isnan(torch.as_tensor(values, dtype=torch.float64)).any()),
         raw_cases=[
             case([[1.0, 2.0, 3.0]]),
             case([[1.0, {"__type__": "nan"}, 3.0]]),
@@ -1862,9 +2215,9 @@ def dataset_snapshot(values: list[Any]) -> dict[str, Any]:
             case([[]]),
             case([[[[1.0, 2.0]]]]),
         ],
-        imports=py_imports(),
-        solution_code="import numpy as np\n\ndef has_nan(values):\n    return bool(np.isnan(np.asarray(values, dtype=float)).any())\n",
-        explanation="NumPy 的 isnan 可以对数组逐元素检测 NaN。",
+        imports=torch_imports(),
+        solution_code="import torch\n\ndef has_nan(values):\n    return bool(torch.isnan(torch.as_tensor(values, dtype=torch.float64)).any())\n",
+        explanation="torch.isnan 可以对 Tensor 逐元素检测 NaN，再用 any 汇总。",
         constraints=["输入可转换为浮点数组", "正负无穷不算 NaN"],
     )
 
@@ -1925,5 +2278,653 @@ def dataset_snapshot(values: list[Any]) -> dict[str, Any]:
         constraints=["0 <= val_ratio <= 1", "n >= 0"],
     )
 
-    assert len(problems) == 60
+    # 现代大模型、优化与多模态高频手撕题
+    add(
+        slug="pairwise-euclidean-distance",
+        title="批量两两欧氏距离",
+        difficulty="中等",
+        category="PyTorch 基础",
+        function_name="pairwise_euclidean_distance",
+        signature="def pairwise_euclidean_distance(x: Any, y: Any) -> torch.Tensor",
+        description="给定形状 (N,D) 和 (M,D) 的两组向量，使用 PyTorch 返回形状 (N,M) 的两两欧氏距离矩阵。",
+        reference=lambda x, y: torch.cdist(torch.as_tensor(x, dtype=torch.float64), torch.as_tensor(y, dtype=torch.float64)),
+        raw_cases=[
+            case([[[0, 0], [1, 0]], [[0, 1], [1, 1]]]),
+            case([[[1, 2]], [[1, 2]]]),
+            case([[[0], [2], [5]], [[1], [3]]]),
+            case([[[-1, -1]], [[1, 1], [-1, -1]]]),
+            case([[[1, 2, 3], [4, 5, 6]], [[0, 0, 0]]]),
+            case([[[0.5, 1.5]], [[1.5, 0.5]]]),
+            case([[[3, 4]], [[0, 0], [6, 8]]]),
+            case([[[0, 0], [0, 0]], [[0, 0]]]),
+        ],
+        imports=torch_imports(),
+        solution_code="import torch\n\ndef pairwise_euclidean_distance(x, y):\n    x = torch.as_tensor(x, dtype=torch.float64)\n    y = torch.as_tensor(y, dtype=torch.float64)\n    return torch.cdist(x, y)\n",
+        explanation="torch.cdist 可以直接计算两批行向量之间的 p 范数距离，本题使用默认 p=2。",
+        constraints=["x、y 均为二维输入", "特征维相同", "返回 torch.Tensor"],
+        company_tags=["Meta", "Amazon", "字节跳动"],
+    )
+
+    add(
+        slug="binary-cross-entropy-logits",
+        title="稳定二元交叉熵",
+        difficulty="中等",
+        category="深度学习基础",
+        function_name="binary_cross_entropy_logits",
+        signature="def binary_cross_entropy_logits(logits: Any, targets: Any) -> float",
+        description="直接从 logits 计算二元交叉熵均值，要求使用数值稳定写法，不要先显式计算概率再取对数。",
+        reference=lambda logits, targets: float(
+            torch.nn.functional.binary_cross_entropy_with_logits(
+                torch.as_tensor(logits, dtype=torch.float64), torch.as_tensor(targets, dtype=torch.float64)
+            )
+        ),
+        raw_cases=[
+            case([[0.0], [0.0]]),
+            case([[0.0], [1.0]]),
+            case([[10.0, -10.0], [1.0, 0.0]]),
+            case([[1000.0, -1000.0], [1.0, 0.0]]),
+            case([[-2.0, 2.0], [1.0, 0.0]]),
+            case([[[1.0, -1.0], [0.5, -0.5]], [[1.0, 0.0], [1.0, 0.0]]]),
+            case([[3.5], [1.0]]),
+            case([[-3.5], [0.0]]),
+        ],
+        imports=torch_imports(),
+        solution_code="import torch\nimport torch.nn.functional as F\n\ndef binary_cross_entropy_logits(logits, targets):\n    logits = torch.as_tensor(logits, dtype=torch.float64)\n    targets = torch.as_tensor(targets, dtype=torch.float64)\n    return float(F.binary_cross_entropy_with_logits(logits, targets))\n",
+        explanation="BCEWithLogits 把 Sigmoid 和 BCE 合并为稳定的 log-sum-exp 计算。",
+        constraints=["logits 与 targets 形状一致", "targets 元素为 0 或 1", "误差容忍 1e-6"],
+        company_tags=["Amazon", "Google", "腾讯"],
+    )
+
+    def ref_focal(logits: Any, targets: Any, alpha: float, gamma: float) -> float:
+        x = torch.as_tensor(logits, dtype=torch.float64)
+        y = torch.as_tensor(targets, dtype=torch.float64)
+        bce = torch.nn.functional.binary_cross_entropy_with_logits(x, y, reduction="none")
+        prob = torch.sigmoid(x)
+        pt = torch.where(y == 1, prob, 1 - prob)
+        alpha_t = torch.where(y == 1, alpha, 1 - alpha)
+        return float((alpha_t * (1 - pt).pow(gamma) * bce).mean())
+
+    add(
+        slug="binary-focal-loss",
+        title="二分类 Focal Loss",
+        difficulty="困难",
+        category="计算机视觉",
+        function_name="binary_focal_loss",
+        signature="def binary_focal_loss(logits: Any, targets: Any, alpha: float, gamma: float) -> float",
+        description="从二分类 logits 计算带 alpha 平衡项的平均 Focal Loss，用于缓解正负样本不均衡。",
+        reference=ref_focal,
+        raw_cases=[
+            case([[0.0], [1.0], 0.25, 2.0]),
+            case([[0.0], [0.0], 0.25, 2.0]),
+            case([[5.0, -5.0], [1.0, 0.0], 0.25, 2.0]),
+            case([[-5.0, 5.0], [1.0, 0.0], 0.25, 2.0]),
+            case([[1.0, -1.0, 0.0], [1.0, 0.0, 1.0], 0.5, 0.0]),
+            case([[[1.0, -1.0]], [[0.0, 1.0]], 0.75, 1.0]),
+            case([[10.0], [1.0], 0.25, 3.0]),
+            case([[-10.0], [0.0], 0.25, 3.0]),
+        ],
+        imports=torch_imports(),
+        solution_code="import torch\nimport torch.nn.functional as F\n\ndef binary_focal_loss(logits, targets, alpha, gamma):\n    logits = torch.as_tensor(logits, dtype=torch.float64)\n    targets = torch.as_tensor(targets, dtype=torch.float64)\n    bce = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')\n    prob = torch.sigmoid(logits)\n    pt = torch.where(targets == 1, prob, 1 - prob)\n    alpha_t = torch.where(targets == 1, alpha, 1 - alpha)\n    return float((alpha_t * (1 - pt).pow(gamma) * bce).mean())\n",
+        explanation="先稳定计算逐元素 BCE，再按真实类别概率 p_t 添加难例调制因子。",
+        constraints=["0 <= alpha <= 1", "gamma >= 0", "logits 与 targets 形状一致"],
+        company_tags=["Meta", "Amazon", "字节跳动"],
+    )
+
+    def ref_dice_loss(logits: Any, targets: Any, eps: float = 1e-6) -> float:
+        prob = torch.sigmoid(torch.as_tensor(logits, dtype=torch.float64))
+        target = torch.as_tensor(targets, dtype=torch.float64)
+        return float(1 - (2 * (prob * target).sum() + eps) / (prob.sum() + target.sum() + eps))
+
+    add(
+        slug="dice-loss",
+        title="分割 Dice Loss",
+        difficulty="中等",
+        category="计算机视觉",
+        function_name="dice_loss",
+        signature="def dice_loss(logits: Any, targets: Any, eps: float = 1e-6) -> float",
+        description="给定二值分割 logits 和 0/1 mask，在整个输入上计算带平滑项的 Dice Loss。",
+        reference=ref_dice_loss,
+        raw_cases=[
+            case([[0.0, 0.0], [1.0, 0.0]]),
+            case([[10.0, -10.0], [1.0, 0.0]]),
+            case([[-10.0, 10.0], [1.0, 0.0]]),
+            case([[[0.0, 0.0], [0.0, 0.0]], [[0.0, 0.0], [0.0, 0.0]]]),
+            case([[[1.0, -1.0]], [[1.0, 1.0]]]),
+            case([[2.0, 2.0, 2.0], [1.0, 1.0, 1.0], 1e-5]),
+            case([[-2.0, -2.0], [0.0, 0.0]]),
+            case([[0.5], [1.0]]),
+        ],
+        imports=torch_imports(),
+        solution_code="import torch\n\ndef dice_loss(logits, targets, eps=1e-6):\n    prob = torch.sigmoid(torch.as_tensor(logits, dtype=torch.float64))\n    targets = torch.as_tensor(targets, dtype=torch.float64)\n    dice = (2 * (prob * targets).sum() + eps) / (prob.sum() + targets.sum() + eps)\n    return float(1 - dice)\n",
+        explanation="Dice 直接度量预测 mask 与目标 mask 的重叠，损失取 1−Dice。",
+        constraints=["logits 与 targets 形状一致", "targets 只含 0/1", "eps > 0"],
+        company_tags=["NVIDIA", "百度", "字节跳动"],
+    )
+
+    def ref_rms_norm(x: Any, weight: Any, eps: float = 1e-6) -> torch.Tensor:
+        value = torch.as_tensor(x, dtype=torch.float64)
+        scale = torch.as_tensor(weight, dtype=torch.float64)
+        return value * torch.rsqrt(value.pow(2).mean(dim=-1, keepdim=True) + eps) * scale
+
+    add(
+        slug="rms-norm",
+        title="RMSNorm 前向计算",
+        difficulty="中等",
+        category="大模型核心组件",
+        function_name="rms_norm",
+        signature="def rms_norm(x: Any, weight: Any, eps: float = 1e-6) -> torch.Tensor",
+        description="使用 PyTorch 手写 RMSNorm：沿最后一维按均方根归一化，再乘逐维权重；不要减均值。",
+        reference=ref_rms_norm,
+        raw_cases=[
+            case([[[1.0, 2.0]], [1.0, 1.0]]),
+            case([[[1.0, -1.0], [2.0, -2.0]], [1.0, 1.0]]),
+            case([[[0.0, 0.0]], [1.0, 1.0]]),
+            case([[[1.0, 2.0, 3.0]], [1.0, 0.5, 2.0]]),
+            case([[[[1.0, 0.0], [0.0, 1.0]]], [1.0, 1.0]]),
+            case([[[-3.0, 4.0]], [2.0, 0.5], 1e-5]),
+            case([[[5.0]], [1.0]]),
+            case([[[0.1, 0.2]], [0.0, 1.0]]),
+        ],
+        imports=torch_imports(),
+        solution_code="import torch\n\ndef rms_norm(x, weight, eps=1e-6):\n    x = torch.as_tensor(x, dtype=torch.float64)\n    weight = torch.as_tensor(weight, dtype=x.dtype)\n    rms_inv = torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + eps)\n    return x * rms_inv * weight\n",
+        explanation="RMSNorm 只按平方均值缩放，不做中心化，现代大语言模型中非常常见。",
+        constraints=["weight 长度等于 x 的最后一维", "eps > 0", "返回 torch.Tensor"],
+        company_tags=["Meta", "Google", "OpenAI", "字节跳动"],
+    )
+
+    add(
+        slug="swiglu-activation",
+        title="SwiGLU 门控激活",
+        difficulty="中等",
+        category="大模型核心组件",
+        function_name="swiglu",
+        signature="def swiglu(gate: Any, value: Any) -> torch.Tensor",
+        description="给定形状相同的 gate 和 value，使用 PyTorch 实现 SwiGLU 核心门控：SiLU(gate) * value。",
+        reference=lambda gate, value: torch.nn.functional.silu(torch.as_tensor(gate, dtype=torch.float64))
+        * torch.as_tensor(value, dtype=torch.float64),
+        raw_cases=[
+            case([[0.0], [1.0]]),
+            case([[1.0, -1.0], [2.0, 3.0]]),
+            case([[[1.0, 2.0], [-1.0, 0.0]], [[1.0, 0.5], [2.0, 3.0]]]),
+            case([[10.0], [0.0]]),
+            case([[-10.0], [2.0]]),
+            case([[0.5, 1.5], [-1.0, 1.0]]),
+            case([[[0.0, 0.0]], [[2.0, -2.0]]]),
+            case([[2.0], [-3.0]]),
+        ],
+        imports=torch_imports(),
+        solution_code="import torch\nimport torch.nn.functional as F\n\ndef swiglu(gate, value):\n    gate = torch.as_tensor(gate, dtype=torch.float64)\n    value = torch.as_tensor(value, dtype=torch.float64)\n    return F.silu(gate) * value\n",
+        explanation="SwiGLU 用 SiLU 激活其中一条支路，并与另一条支路逐元素相乘。",
+        constraints=["gate 与 value 形状一致", "返回 torch.Tensor"],
+        company_tags=["Google", "Meta", "OpenAI"],
+    )
+
+    def ref_rope(x: Any, base: float = 10000.0) -> torch.Tensor:
+        value = torch.as_tensor(x, dtype=torch.float64)
+        seq, dim = value.shape
+        pos = torch.arange(seq, dtype=value.dtype).unsqueeze(1)
+        pair = torch.arange(0, dim, 2, dtype=value.dtype)
+        angle = pos / torch.pow(base, pair / dim)
+        even, odd = value[:, 0::2], value[:, 1::2]
+        out = torch.empty_like(value)
+        out[:, 0::2] = even * torch.cos(angle) - odd * torch.sin(angle)
+        out[:, 1::2] = even * torch.sin(angle) + odd * torch.cos(angle)
+        return out
+
+    add(
+        slug="rotary-position-embedding",
+        title="RoPE 旋转位置编码",
+        difficulty="困难",
+        category="大模型核心组件",
+        function_name="apply_rope",
+        signature="def apply_rope(x: Any, base: float = 10000.0) -> torch.Tensor",
+        description="对形状 (seq, dim) 且 dim 为偶数的 Tensor 应用 Rotary Position Embedding，相邻偶/奇维组成一个二维旋转对。",
+        reference=ref_rope,
+        raw_cases=[
+            case([[[1.0, 0.0], [1.0, 0.0]]]),
+            case([[[1.0, 2.0, 3.0, 4.0]]]),
+            case([[[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]]),
+            case([[[0.0, 0.0], [2.0, -1.0]], 100.0]),
+            case([[[1.0, 2.0, 3.0, 4.0], [4.0, 3.0, 2.0, 1.0]]]),
+            case([[[5.0, -2.0]]]),
+            case([[[1.0, 1.0], [1.0, 1.0]], 10.0]),
+            case([[[0.5, -0.5, 1.5, -1.5], [2.0, 3.0, 4.0, 5.0]]]),
+        ],
+        imports=torch_imports(),
+        solution_code="import torch\n\ndef apply_rope(x, base=10000.0):\n    x = torch.as_tensor(x, dtype=torch.float64)\n    seq, dim = x.shape\n    pos = torch.arange(seq, dtype=x.dtype).unsqueeze(1)\n    pair = torch.arange(0, dim, 2, dtype=x.dtype)\n    angle = pos / torch.pow(base, pair / dim)\n    even, odd = x[:, 0::2], x[:, 1::2]\n    out = torch.empty_like(x)\n    out[:, 0::2] = even * torch.cos(angle) - odd * torch.sin(angle)\n    out[:, 1::2] = even * torch.sin(angle) + odd * torch.cos(angle)\n    return out\n",
+        explanation="RoPE 不把位置向量直接相加，而是根据位置对 Query/Key 的相邻通道做二维旋转。",
+        constraints=["x 为二维输入", "dim 为正偶数", "base > 1"],
+        company_tags=["Meta", "Google", "字节跳动", "阿里巴巴"],
+    )
+
+    def ref_lora(x: Any, weight: Any, a: Any, b: Any, alpha: float) -> torch.Tensor:
+        value = torch.as_tensor(x, dtype=torch.float64)
+        w = torch.as_tensor(weight, dtype=torch.float64)
+        lora_a = torch.as_tensor(a, dtype=torch.float64)
+        lora_b = torch.as_tensor(b, dtype=torch.float64)
+        return torch.nn.functional.linear(value, w) + (alpha / lora_a.shape[0]) * torch.nn.functional.linear(
+            torch.nn.functional.linear(value, lora_a), lora_b
+        )
+
+    add(
+        slug="lora-linear-forward",
+        title="LoRA 线性层前向",
+        difficulty="困难",
+        category="大模型核心组件",
+        function_name="lora_linear",
+        signature="def lora_linear(x: Any, weight: Any, a: Any, b: Any, alpha: float) -> torch.Tensor",
+        description="实现无 bias 的 LoRA 线性层前向：冻结主权重 W，并叠加由 A、B 构成的低秩更新，缩放为 alpha/r。",
+        reference=ref_lora,
+        raw_cases=[
+            case([[[1.0, 2.0]], [[1.0, 0.0], [0.0, 1.0]], [[1.0, 1.0]], [[1.0], [2.0]], 1.0]),
+            case([[[1.0, 0.0], [0.0, 1.0]], [[1.0, 2.0]], [[1.0, -1.0]], [[0.5]], 2.0]),
+            case([[[0.0, 0.0]], [[1.0, 1.0]], [[1.0, 0.0]], [[1.0]], 1.0]),
+            case([[[1.0]], [[2.0]], [[3.0]], [[4.0]], 0.0]),
+            case([[[1.0, -1.0]], [[0.5, 0.5]], [[1.0, 0.0], [0.0, 1.0]], [[1.0, 1.0]], 2.0]),
+            case([[[2.0, 3.0]], [[1.0, 0.0], [0.0, 1.0]], [[0.5, 0.5]], [[2.0], [-1.0]], 4.0]),
+            case([[[[1.0, 2.0], [3.0, 4.0]]], [[1.0, 1.0]], [[1.0, 0.0]], [[1.0]], 1.0]),
+            case([[[-1.0, 1.0]], [[1.0, -1.0]], [[2.0, 2.0]], [[0.25]], 8.0]),
+        ],
+        imports=torch_imports(),
+        solution_code="import torch\nimport torch.nn.functional as F\n\ndef lora_linear(x, weight, a, b, alpha):\n    x = torch.as_tensor(x, dtype=torch.float64)\n    weight = torch.as_tensor(weight, dtype=x.dtype)\n    a = torch.as_tensor(a, dtype=x.dtype)\n    b = torch.as_tensor(b, dtype=x.dtype)\n    base = F.linear(x, weight)\n    update = F.linear(F.linear(x, a), b)\n    return base + (alpha / a.shape[0]) * update\n",
+        explanation="LoRA 用两个小矩阵表达低秩权重增量，无需显式构造完整的 B@A。",
+        constraints=["矩阵形状满足题面公式", "r=a.shape[0] >= 1", "无 bias"],
+        company_tags=["Microsoft", "Meta", "OpenAI", "阿里巴巴"],
+    )
+
+    def ref_clip_grad(grads: list[Any], max_norm: float, eps: float = 1e-6) -> list[torch.Tensor]:
+        tensors = [torch.as_tensor(grad, dtype=torch.float64) for grad in grads]
+        total = torch.sqrt(sum((grad * grad).sum() for grad in tensors))
+        coef = min(1.0, max_norm / (float(total) + eps))
+        return [grad * coef for grad in tensors]
+
+    add(
+        slug="clip-grad-global-norm",
+        title="按全局范数裁剪梯度",
+        difficulty="中等",
+        category="训练、调试与工程",
+        function_name="clip_grad_global_norm",
+        signature="def clip_grad_global_norm(grads: list[Any], max_norm: float, eps: float = 1e-6) -> list[torch.Tensor]",
+        description="给定多个梯度 Tensor，按所有梯度共同的全局 L2 范数进行裁剪，并返回裁剪后的新 Tensor 列表。",
+        reference=ref_clip_grad,
+        raw_cases=[
+            case([[[3.0, 4.0]], 5.0]),
+            case([[[3.0, 4.0]], 1.0]),
+            case([[[1.0, 2.0], [2.0]], 10.0]),
+            case([[[0.0, 0.0]], 1.0]),
+            case([[[[1.0, -1.0]], [[2.0]]], 2.0]),
+            case([[[6.0], [8.0]], 5.0, 1e-8]),
+            case([[[-3.0, -4.0], [0.0]], 2.5]),
+            case([[[0.1, 0.2, 0.3]], 0.1]),
+        ],
+        imports=torch_imports(),
+        solution_code="import torch\n\ndef clip_grad_global_norm(grads, max_norm, eps=1e-6):\n    grads = [torch.as_tensor(g, dtype=torch.float64) for g in grads]\n    total_norm = torch.sqrt(sum((g * g).sum() for g in grads))\n    coef = min(1.0, max_norm / (float(total_norm) + eps))\n    return [g * coef for g in grads]\n",
+        explanation="全局裁剪必须先联合计算所有梯度的范数，再对每个梯度使用同一个缩放系数。",
+        constraints=["grads 非空", "max_norm > 0", "不修改原输入"],
+        company_tags=["NVIDIA", "OpenAI", "字节跳动"],
+    )
+
+    def ref_sgd_momentum(param: Any, grad: Any, velocity: Any, lr: float, momentum: float) -> dict[str, torch.Tensor]:
+        p = torch.as_tensor(param, dtype=torch.float64)
+        g = torch.as_tensor(grad, dtype=torch.float64)
+        v = momentum * torch.as_tensor(velocity, dtype=torch.float64) + g
+        return {"param": p - lr * v, "velocity": v}
+
+    add(
+        slug="sgd-momentum-step",
+        title="SGD Momentum 单步更新",
+        difficulty="中等",
+        category="优化器与训练",
+        function_name="sgd_momentum_step",
+        signature="def sgd_momentum_step(param: Any, grad: Any, velocity: Any, lr: float, momentum: float) -> dict[str, torch.Tensor]",
+        description="实现一次经典 SGD Momentum 更新，返回更新后的 param 和 velocity，均为 Tensor。",
+        reference=ref_sgd_momentum,
+        raw_cases=[
+            case([[1.0], [0.5], [0.0], 0.1, 0.9]),
+            case([[1.0, 2.0], [0.1, -0.2], [0.5, 0.5], 0.01, 0.9]),
+            case([[0.0], [1.0], [2.0], 0.5, 0.0]),
+            case([[[-1.0, 1.0]], [[0.5, -0.5]], [[0.0, 0.0]], 0.1, 0.5]),
+            case([[10.0], [-2.0], [1.0], 0.01, 0.99]),
+            case([[1.0, 1.0], [0.0, 0.0], [1.0, -1.0], 0.1, 0.9]),
+            case([[3.0], [4.0], [-2.0], 0.25, 0.5]),
+            case([[[1.0], [2.0]], [[3.0], [4.0]], [[0.0], [1.0]], 0.05, 0.8]),
+        ],
+        imports=torch_imports(),
+        solution_code="import torch\n\ndef sgd_momentum_step(param, grad, velocity, lr, momentum):\n    param = torch.as_tensor(param, dtype=torch.float64)\n    grad = torch.as_tensor(grad, dtype=torch.float64)\n    velocity = momentum * torch.as_tensor(velocity, dtype=torch.float64) + grad\n    return {'param': param - lr * velocity, 'velocity': velocity}\n",
+        explanation="Momentum 把历史速度与当前梯度累加，再用新速度更新参数。",
+        constraints=["param、grad、velocity 形状一致", "lr > 0", "0 <= momentum < 1"],
+        company_tags=["Google", "Amazon", "华为"],
+    )
+
+    def ref_adamw(
+        param: Any,
+        grad: Any,
+        m: Any,
+        v: Any,
+        step: int,
+        lr: float,
+        beta1: float,
+        beta2: float,
+        eps: float,
+        weight_decay: float,
+    ) -> dict[str, torch.Tensor]:
+        p = torch.as_tensor(param, dtype=torch.float64)
+        g = torch.as_tensor(grad, dtype=torch.float64)
+        first = beta1 * torch.as_tensor(m, dtype=torch.float64) + (1 - beta1) * g
+        second = beta2 * torch.as_tensor(v, dtype=torch.float64) + (1 - beta2) * g.square()
+        first_hat = first / (1 - beta1**step)
+        second_hat = second / (1 - beta2**step)
+        updated = p * (1 - lr * weight_decay) - lr * first_hat / (torch.sqrt(second_hat) + eps)
+        return {"param": updated, "m": first, "v": second}
+
+    add(
+        slug="adamw-step",
+        title="AdamW 单步更新",
+        difficulty="困难",
+        category="优化器与训练",
+        function_name="adamw_step",
+        signature="def adamw_step(param: Any, grad: Any, m: Any, v: Any, step: int, lr: float, beta1: float, beta2: float, eps: float, weight_decay: float) -> dict[str, torch.Tensor]",
+        description="实现一次带偏差修正和解耦权重衰减的 AdamW 更新，返回新的 param、m、v。step 从 1 开始。",
+        reference=ref_adamw,
+        raw_cases=[
+            case([[1.0], [0.1], [0.0], [0.0], 1, 0.001, 0.9, 0.999, 1e-8, 0.01]),
+            case([[1.0, 2.0], [0.1, -0.2], [0.0, 0.0], [0.0, 0.0], 1, 0.01, 0.9, 0.99, 1e-8, 0.0]),
+            case([[0.0], [1.0], [0.2], [0.3], 2, 0.1, 0.5, 0.9, 1e-6, 0.1]),
+            case([[[-1.0, 1.0]], [[0.5, -0.5]], [[0.1, -0.1]], [[0.2, 0.2]], 5, 0.001, 0.9, 0.999, 1e-8, 0.01]),
+            case([[10.0], [0.0], [1.0], [2.0], 3, 0.01, 0.8, 0.9, 1e-5, 0.1]),
+            case([[1.0], [-2.0], [0.0], [0.0], 1, 0.1, 0.0, 0.0, 1e-8, 0.0]),
+            case([[3.0, 4.0], [0.3, 0.4], [0.1, 0.2], [0.01, 0.02], 10, 0.005, 0.9, 0.999, 1e-8, 0.05]),
+            case([[[1.0], [2.0]], [[0.1], [0.2]], [[0.0], [0.0]], [[0.0], [0.0]], 1, 0.01, 0.9, 0.999, 1e-8, 0.01]),
+        ],
+        imports=torch_imports(),
+        solution_code="import torch\n\ndef adamw_step(param, grad, m, v, step, lr, beta1, beta2, eps, weight_decay):\n    param = torch.as_tensor(param, dtype=torch.float64)\n    grad = torch.as_tensor(grad, dtype=torch.float64)\n    m = beta1 * torch.as_tensor(m, dtype=torch.float64) + (1 - beta1) * grad\n    v = beta2 * torch.as_tensor(v, dtype=torch.float64) + (1 - beta2) * grad.square()\n    m_hat = m / (1 - beta1 ** step)\n    v_hat = v / (1 - beta2 ** step)\n    param = param * (1 - lr * weight_decay) - lr * m_hat / (torch.sqrt(v_hat) + eps)\n    return {'param': param, 'm': m, 'v': v}\n",
+        explanation="AdamW 与 L2 正则化版 Adam 的关键区别是权重衰减从自适应梯度项中解耦。",
+        constraints=["step >= 1", "张量形状一致", "0 <= beta1,beta2 < 1", "eps > 0"],
+        company_tags=["Google", "Meta", "NVIDIA", "字节跳动"],
+    )
+
+    def ref_warmup_cosine(step: int, warmup_steps: int, total_steps: int, max_lr: float, min_lr: float) -> float:
+        if step < warmup_steps:
+            return max_lr * (step + 1) / warmup_steps
+        progress = (step - warmup_steps) / (total_steps - warmup_steps - 1)
+        return min_lr + 0.5 * (max_lr - min_lr) * (1 + math.cos(math.pi * progress))
+
+    add(
+        slug="warmup-cosine-learning-rate",
+        title="Warmup + Cosine 学习率",
+        difficulty="中等",
+        category="优化器与训练",
+        function_name="warmup_cosine_lr",
+        signature="def warmup_cosine_lr(step: int, warmup_steps: int, total_steps: int, max_lr: float, min_lr: float) -> float",
+        description="实现从 step=0 开始的线性 warmup 与余弦衰减。warmup 最后一步到达 max_lr，训练最后一步到达 min_lr。",
+        reference=ref_warmup_cosine,
+        raw_cases=[
+            case([0, 2, 6, 1.0, 0.0]),
+            case([1, 2, 6, 1.0, 0.0]),
+            case([2, 2, 6, 1.0, 0.0]),
+            case([5, 2, 6, 1.0, 0.0]),
+            case([3, 1, 5, 0.1, 0.01]),
+            case([0, 1, 3, 0.01, 0.001]),
+            case([2, 1, 3, 0.01, 0.001]),
+            case([4, 3, 7, 2.0, 0.5]),
+        ],
+        imports=py_imports(),
+        solution_code="import math\n\ndef warmup_cosine_lr(step, warmup_steps, total_steps, max_lr, min_lr):\n    if step < warmup_steps:\n        return max_lr * (step + 1) / warmup_steps\n    progress = (step - warmup_steps) / (total_steps - warmup_steps - 1)\n    return min_lr + 0.5 * (max_lr - min_lr) * (1 + math.cos(math.pi * progress))\n",
+        explanation="先线性升温，再把余下 step 归一化到 [0,1] 并套用半个余弦周期。",
+        constraints=["1 <= warmup_steps < total_steps-1", "0 <= step < total_steps", "0 <= min_lr <= max_lr"],
+        company_tags=["Google", "OpenAI", "字节跳动"],
+    )
+
+    add(
+        slug="exponential-moving-average",
+        title="模型参数 EMA 更新",
+        difficulty="简单",
+        category="优化器与训练",
+        function_name="ema_update",
+        signature="def ema_update(shadow: Any, current: Any, decay: float) -> torch.Tensor",
+        description="给定上一时刻的 shadow 参数和当前模型参数，返回一次指数移动平均更新后的 Tensor。",
+        reference=lambda shadow, current, decay: decay * torch.as_tensor(shadow, dtype=torch.float64)
+        + (1 - decay) * torch.as_tensor(current, dtype=torch.float64),
+        raw_cases=[
+            case([[0.0], [1.0], 0.9]),
+            case([[1.0, 2.0], [3.0, 4.0], 0.5]),
+            case([[[1.0, 0.0]], [[0.0, 1.0]], 0.99]),
+            case([[5.0], [-5.0], 0.0]),
+            case([[5.0], [-5.0], 1.0]),
+            case([[-1.0, 1.0], [1.0, -1.0], 0.8]),
+            case([[[[1.0], [2.0]]], [[[3.0], [4.0]]], 0.25]),
+            case([[0.1], [0.2], 0.999]),
+        ],
+        imports=torch_imports(),
+        solution_code="import torch\n\ndef ema_update(shadow, current, decay):\n    shadow = torch.as_tensor(shadow, dtype=torch.float64)\n    current = torch.as_tensor(current, dtype=torch.float64)\n    return decay * shadow + (1 - decay) * current\n",
+        explanation="EMA 用较大权重保留历史平滑参数，并吸收少量当前参数。",
+        constraints=["shadow 与 current 形状一致", "0 <= decay <= 1"],
+        company_tags=["NVIDIA", "Meta", "百度"],
+    )
+
+    def ref_top_p(probs: list[float], p: float) -> list[int]:
+        values = torch.as_tensor(probs, dtype=torch.float64)
+        order = torch.argsort(values, descending=True, stable=True)
+        cumulative = torch.cumsum(values[order], dim=0)
+        count = int(torch.searchsorted(cumulative, torch.tensor(p, dtype=values.dtype), right=False)) + 1
+        return order[: min(count, len(probs))].tolist()
+
+    add(
+        slug="top-p-sampling-candidates",
+        title="Top-P Nucleus 候选集",
+        difficulty="中等",
+        category="大模型推理与解码",
+        function_name="top_p_candidates",
+        signature="def top_p_candidates(probs: list[float], p: float) -> list[int]",
+        description="按概率降序返回最小的 token 下标集合，使累计概率达到 p；概率相同保持原下标顺序，且至少保留一个 token。",
+        reference=ref_top_p,
+        raw_cases=[
+            case([[0.6, 0.3, 0.1], 0.8]),
+            case([[0.4, 0.3, 0.2, 0.1], 0.5]),
+            case([[1.0], 0.9]),
+            case([[0.5, 0.5], 0.5]),
+            case([[0.25, 0.25, 0.25, 0.25], 0.7]),
+            case([[0.05, 0.15, 0.8], 1.0]),
+            case([[0.9, 0.05, 0.05], 0.1]),
+            case([[0.1, 0.2, 0.3, 0.4], 0.6]),
+        ],
+        imports=torch_imports(),
+        solution_code="import torch\n\ndef top_p_candidates(probs, p):\n    probs = torch.as_tensor(probs, dtype=torch.float64)\n    order = torch.argsort(probs, descending=True, stable=True)\n    cumulative = torch.cumsum(probs[order], dim=0)\n    count = int(torch.searchsorted(cumulative, torch.tensor(p, dtype=probs.dtype))) + 1\n    return order[:min(count, len(probs))].tolist()\n",
+        explanation="Nucleus Sampling 动态选择刚好覆盖目标概率质量的最小候选集合。",
+        constraints=["probs 非空且和为 1", "0 < p <= 1"],
+        company_tags=["OpenAI", "Meta", "字节跳动"],
+    )
+
+    add(
+        slug="perplexity-from-token-losses",
+        title="由 Token Loss 计算困惑度",
+        difficulty="简单",
+        category="大模型评估",
+        function_name="perplexity",
+        signature="def perplexity(token_losses: list[float]) -> float",
+        description="给定一组使用自然对数计算的有效 token 交叉熵，返回 exp(mean(loss)) 形式的困惑度。",
+        reference=lambda token_losses: float(torch.exp(torch.as_tensor(token_losses, dtype=torch.float64).mean())),
+        raw_cases=[
+            case([[0.0]]),
+            case([[math.log(2.0)]]),
+            case([[0.0, math.log(4.0)]]),
+            case([[1.0, 1.0, 1.0]]),
+            case([[0.1, 0.2, 0.3]]),
+            case([[2.0, 3.0]]),
+            case([[math.log(10.0), math.log(10.0)]]),
+            case([[0.5]]),
+        ],
+        imports=torch_imports(),
+        solution_code="import torch\n\ndef perplexity(token_losses):\n    losses = torch.as_tensor(token_losses, dtype=torch.float64)\n    return float(torch.exp(losses.mean()))\n",
+        explanation="困惑度是平均负对数似然的指数，越低通常表示语言模型对数据越不困惑。",
+        constraints=["token_losses 非空", "元素为有限非负数", "使用自然对数"],
+        company_tags=["OpenAI", "Google", "Meta", "百度"],
+    )
+
+    def ref_info_nce(a: Any, b: Any, temperature: float) -> float:
+        left = torch.nn.functional.normalize(torch.as_tensor(a, dtype=torch.float64), dim=1)
+        right = torch.nn.functional.normalize(torch.as_tensor(b, dtype=torch.float64), dim=1)
+        logits = left @ right.transpose(0, 1) / temperature
+        labels = torch.arange(left.shape[0])
+        return float(torch.nn.functional.cross_entropy(logits, labels))
+
+    add(
+        slug="info-nce-loss",
+        title="InfoNCE 对比学习损失",
+        difficulty="困难",
+        category="多模态与表征学习",
+        function_name="info_nce_loss",
+        signature="def info_nce_loss(a: Any, b: Any, temperature: float) -> float",
+        description="两组形状 (N,D) 的 embedding 按行一一配对为正样本。先做 L2 归一化，再计算单向 a→b 的温度缩放 InfoNCE 损失。",
+        reference=ref_info_nce,
+        raw_cases=[
+            case([[[1.0, 0.0], [0.0, 1.0]], [[1.0, 0.0], [0.0, 1.0]], 1.0]),
+            case([[[1.0, 0.0], [0.0, 1.0]], [[0.0, 1.0], [1.0, 0.0]], 1.0]),
+            case([[[1.0, 2.0]], [[2.0, 4.0]], 0.5]),
+            case([[[1.0, 1.0], [1.0, -1.0]], [[2.0, 2.0], [2.0, -2.0]], 0.1]),
+            case([[[1.0, 0.0], [-1.0, 0.0]], [[1.0, 0.0], [-1.0, 0.0]], 2.0]),
+            case([[[1.0, 2.0, 3.0], [3.0, 2.0, 1.0]], [[1.0, 2.0, 3.0], [3.0, 2.0, 1.0]], 0.7]),
+            case([[[0.5, 0.5], [0.2, 0.8]], [[0.6, 0.4], [0.1, 0.9]], 1.0]),
+            case([[[3.0, 4.0]], [[-3.0, -4.0]], 1.0]),
+        ],
+        imports=torch_imports(),
+        solution_code="import torch\nimport torch.nn.functional as F\n\ndef info_nce_loss(a, b, temperature):\n    a = F.normalize(torch.as_tensor(a, dtype=torch.float64), dim=1)\n    b = F.normalize(torch.as_tensor(b, dtype=torch.float64), dim=1)\n    logits = a @ b.transpose(0, 1) / temperature\n    labels = torch.arange(a.shape[0])\n    return float(F.cross_entropy(logits, labels))\n",
+        explanation="归一化点积等于余弦相似度，对角线配对就是每行交叉熵的目标类别。",
+        constraints=["a、b 形状相同且无零向量", "temperature > 0", "正样本位于对角线"],
+        company_tags=["OpenAI", "Google", "Meta"],
+    )
+
+    def ref_distill(student: Any, teacher: Any, temperature: float) -> float:
+        s = torch.as_tensor(student, dtype=torch.float64) / temperature
+        t = torch.as_tensor(teacher, dtype=torch.float64) / temperature
+        return float(
+            torch.nn.functional.kl_div(
+                torch.nn.functional.log_softmax(s, dim=-1),
+                torch.nn.functional.softmax(t, dim=-1),
+                reduction="batchmean",
+            )
+            * temperature**2
+        )
+
+    add(
+        slug="knowledge-distillation-kl",
+        title="知识蒸馏 KL Loss",
+        difficulty="困难",
+        category="模型压缩与部署",
+        function_name="distillation_kl_loss",
+        signature="def distillation_kl_loss(student_logits: Any, teacher_logits: Any, temperature: float) -> float",
+        description="计算教师分布到学生分布的知识蒸馏 KL 损失，使用 batchmean 约简并乘 temperature²。",
+        reference=ref_distill,
+        raw_cases=[
+            case([[[1.0, 2.0]], [[1.0, 2.0]], 1.0]),
+            case([[[2.0, 0.0]], [[0.0, 2.0]], 1.0]),
+            case([[[1.0, 2.0], [3.0, 1.0]], [[1.5, 1.5], [2.0, 2.0]], 2.0]),
+            case([[[0.0, 0.0]], [[10.0, -10.0]], 4.0]),
+            case([[[1000.0, 999.0]], [[999.0, 1000.0]], 1.0]),
+            case([[[1.0, 2.0, 3.0]], [[3.0, 2.0, 1.0]], 0.5]),
+            case([[[0.0], [1.0]], [[2.0], [-3.0]], 3.0]),
+            case([[[-1.0, 1.0]], [[-2.0, 2.0]], 2.0]),
+        ],
+        imports=torch_imports(),
+        solution_code="import torch\nimport torch.nn.functional as F\n\ndef distillation_kl_loss(student_logits, teacher_logits, temperature):\n    student = torch.as_tensor(student_logits, dtype=torch.float64) / temperature\n    teacher = torch.as_tensor(teacher_logits, dtype=torch.float64) / temperature\n    log_p = F.log_softmax(student, dim=-1)\n    q = F.softmax(teacher, dim=-1)\n    return float(F.kl_div(log_p, q, reduction='batchmean') * temperature ** 2)\n",
+        explanation="PyTorch 的 kl_div 第一个参数应是学生 log-prob，第二个参数是教师 probability。",
+        constraints=["两组 logits 形状一致且为二维", "temperature > 0", "使用 batchmean"],
+        company_tags=["Google", "Microsoft", "华为", "百度"],
+    )
+
+    add(
+        slug="global-average-pooling",
+        title="全局平均池化",
+        difficulty="简单",
+        category="计算机视觉",
+        function_name="global_average_pooling",
+        signature="def global_average_pooling(x: Any) -> torch.Tensor",
+        description="给定形状 (C,H,W) 的特征图，使用 PyTorch 对空间维做全局平均池化，返回形状 (C,) 的 Tensor。",
+        reference=lambda x: torch.as_tensor(x, dtype=torch.float64).mean(dim=(-2, -1)),
+        raw_cases=[
+            case([[[[1.0, 2.0], [3.0, 4.0]]]]),
+            case([[[[1.0]], [[2.0]]]]),
+            case([[[[1.0, 1.0]], [[2.0, 4.0]]]]),
+            case([[[[-1.0, 1.0], [2.0, -2.0]]]]),
+            case([[[[0.0, 0.0], [0.0, 0.0]], [[1.0, 2.0], [3.0, 4.0]]]]),
+            case([[[[5.0, 7.0, 9.0]]]]),
+            case([[[[1.5], [2.5], [3.5]]]]),
+            case([[[[1.0]], [[-1.0]], [[0.0]]]]),
+        ],
+        imports=torch_imports(),
+        solution_code="import torch\n\ndef global_average_pooling(x):\n    x = torch.as_tensor(x, dtype=torch.float64)\n    return x.mean(dim=(-2, -1))\n",
+        explanation="全局平均池化保留通道维，并对最后两个空间维同时求均值。",
+        constraints=["x 为三维 (C,H,W) 输入", "H、W >= 1", "返回 torch.Tensor"],
+        company_tags=["NVIDIA", "Google", "百度"],
+    )
+
+    def ref_topk_accuracy(logits: Any, labels: list[int], k: int) -> float:
+        scores = torch.as_tensor(logits, dtype=torch.float64)
+        target = torch.as_tensor(labels, dtype=torch.long)
+        topk = torch.topk(scores, k, dim=1).indices
+        return float((topk == target.unsqueeze(1)).any(dim=1).double().mean())
+
+    add(
+        slug="top-k-accuracy",
+        title="分类 Top-K Accuracy",
+        difficulty="中等",
+        category="大模型评估",
+        function_name="top_k_accuracy",
+        signature="def top_k_accuracy(logits: Any, labels: list[int], k: int) -> float",
+        description="给定 batch×classes 的 logits 和真实类别，返回真实类别落入每行 Top-K 预测的样本比例。",
+        reference=ref_topk_accuracy,
+        raw_cases=[
+            case([[[1.0, 3.0, 2.0], [5.0, 0.0, 1.0]], [1, 0], 1]),
+            case([[[1.0, 3.0, 2.0], [5.0, 0.0, 1.0]], [2, 1], 2]),
+            case([[[1.0]], [0], 1]),
+            case([[[0.1, 0.2, 0.3]], [0], 3]),
+            case([[[-1.0, -2.0], [2.0, 3.0]], [0, 0], 1]),
+            case([[[10.0, 0.0, -1.0], [0.0, 10.0, -1.0], [0.0, -1.0, 10.0]], [0, 1, 2], 1]),
+            case([[[1.0, 2.0, 3.0, 4.0]], [1], 2]),
+            case([[[4.0, 3.0, 2.0, 1.0], [1.0, 2.0, 3.0, 4.0]], [3, 0], 3]),
+        ],
+        imports=torch_imports(),
+        solution_code="import torch\n\ndef top_k_accuracy(logits, labels, k):\n    logits = torch.as_tensor(logits, dtype=torch.float64)\n    labels = torch.as_tensor(labels, dtype=torch.long)\n    topk = torch.topk(logits, k, dim=1).indices\n    correct = (topk == labels.unsqueeze(1)).any(dim=1)\n    return float(correct.double().mean())\n",
+        explanation="每行只需检查真实类别是否出现在 torch.topk 返回的下标集合中。",
+        constraints=["1 <= k <= 类别数", "labels 长度等于 batch size", "测试数据不含并列边界"],
+        company_tags=["Amazon", "Google", "Meta", "腾讯"],
+    )
+
+    def ref_quantize(x: Any, num_bits: int) -> torch.Tensor:
+        value = torch.as_tensor(x, dtype=torch.float64)
+        qmax = 2 ** (num_bits - 1) - 1
+        max_abs = value.abs().max()
+        if float(max_abs) == 0:
+            return torch.zeros_like(value)
+        scale = max_abs / qmax
+        quantized = torch.clamp(torch.round(value / scale), -qmax, qmax)
+        return quantized * scale
+
+    add(
+        slug="symmetric-quantize-dequantize",
+        title="对称量化与反量化",
+        difficulty="中等",
+        category="模型压缩与部署",
+        function_name="symmetric_quantize_dequantize",
+        signature="def symmetric_quantize_dequantize(x: Any, num_bits: int) -> torch.Tensor",
+        description="实现有符号、逐 Tensor、对称量化后立即反量化。整数范围使用 [−Q,Q]，Q=2^(num_bits−1)−1。",
+        reference=ref_quantize,
+        raw_cases=[
+            case([[-1.0, 0.0, 1.0], 8]),
+            case([[0.0, 0.0], 8]),
+            case([[-2.0, 1.0, 2.0], 4]),
+            case([[[1.0, -1.0], [0.5, -0.5]], 8]),
+            case([[10.0], 2]),
+            case([[-3.0, 0.7, 2.2], 3]),
+            case([[0.1, 0.2, 0.3], 8]),
+            case([[-100.0, 50.0, 0.0], 6]),
+        ],
+        imports=torch_imports(),
+        solution_code="import torch\n\ndef symmetric_quantize_dequantize(x, num_bits):\n    x = torch.as_tensor(x, dtype=torch.float64)\n    qmax = 2 ** (num_bits - 1) - 1\n    max_abs = x.abs().max()\n    if float(max_abs) == 0:\n        return torch.zeros_like(x)\n    scale = max_abs / qmax\n    q = torch.clamp(torch.round(x / scale), -qmax, qmax)\n    return q * scale\n",
+        explanation="对称量化用一个 scale 把浮点范围映射到有符号整数，再乘 scale 得到可比较的反量化值。",
+        constraints=["2 <= num_bits <= 16", "x 非空", "返回 torch.Tensor"],
+        company_tags=["NVIDIA", "Microsoft", "华为", "阿里巴巴"],
+    )
+
+    assert len(problems) == 80
     return problems

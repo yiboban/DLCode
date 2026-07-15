@@ -2,13 +2,17 @@ export function cx(...classes: Array<string | false | null | undefined>): string
   return classes.filter(Boolean).join(" ");
 }
 
-export function formatValue(value: unknown): string {
+function compactJson(value: unknown): string {
+  return JSON.stringify(value);
+}
+
+export function formatValue(value: unknown, compact = false): string {
   if (value && typeof value === "object" && "__type__" in value) {
     const typed = value as { __type__: string; data?: unknown };
     const name = typed.__type__ === "tensor" ? "Tensor" : "ndarray";
-    return `${name}(${JSON.stringify(typed.data, null, 2)})`;
+    return `${name}(${compact ? compactJson(typed.data) : JSON.stringify(typed.data, null, 2)})`;
   }
-  return JSON.stringify(value, null, 2);
+  return compact ? compactJson(value) : JSON.stringify(value, null, 2);
 }
 
 export function statusClass(status: string): string {

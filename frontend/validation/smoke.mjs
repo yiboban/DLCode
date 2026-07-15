@@ -21,13 +21,17 @@ const html = await fetch(frontend).then((response) => response.text());
 if (!html.includes("DLCode")) throw new Error("前端首页未返回 DLCode 页面");
 
 const problems = await getJson("/api/problems");
-if (problems.total < 60) throw new Error("题库数量不足 60");
+if (problems.total < 80) throw new Error("题库数量不足 80");
 
-const filtered = await getJson(`/api/problems?category=${encodeURIComponent("Python 与 NumPy 基础")}`);
+const filtered = await getJson(`/api/problems?category=${encodeURIComponent("Python 与 PyTorch 基础")}`);
 if (!filtered.items.length) throw new Error("分类筛选没有返回题目");
 
 const detail = await getJson("/api/problems/matrix-transpose");
 if (!detail.starter_code || detail.hidden_tests) throw new Error("题目详情字段不符合预期");
+
+const positional = await getJson("/api/problems/sinusoidal-positional-encoding");
+if (positional.presentation?.formulas?.length !== 2) throw new Error("正弦位置编码公式缺失");
+if (!positional.starter_code.includes("torch")) throw new Error("正弦位置编码未使用 PyTorch 模板");
 
 const draftCode = "def matrix_transpose(matrix):\n    return matrix\n";
 await postJson(`/api/drafts/${detail.id}`, { code: draftCode }, "PUT");

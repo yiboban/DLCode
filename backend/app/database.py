@@ -1,4 +1,5 @@
 from collections.abc import Generator
+import os
 from pathlib import Path
 
 from sqlalchemy import create_engine
@@ -6,7 +7,7 @@ from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 
 BASE_DIR = Path(__file__).resolve().parents[2]
-DATABASE_URL = f"sqlite:///{BASE_DIR / 'dlcode.db'}"
+DATABASE_URL = os.environ.get("DLCODE_DATABASE_URL", f"sqlite:///{BASE_DIR / 'dlcode.db'}")
 
 engine = create_engine(
     DATABASE_URL,

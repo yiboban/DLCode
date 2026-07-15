@@ -29,14 +29,12 @@ import contextlib
 import io
 import json
 import math
+import numbers
 import os
 import sys
 import time
 import traceback
 from typing import Any
-
-import numpy as np
-import torch
 
 ATOL = 1e-6
 RTOL = 1e-5
@@ -63,14 +61,48 @@ class LimitedWriter(io.StringIO):
         return super().write(s)
 
 
+def get_np():
+    import numpy as np
+
+    return np
+
+
+def get_torch():
+    import torch
+
+    return torch
+
+
+def loaded_np():
+    return sys.modules.get("numpy")
+
+
+def loaded_torch():
+    return sys.modules.get("torch")
+
+
+def is_numpy_array(value: Any) -> bool:
+    np = loaded_np()
+    return np is not None and isinstance(value, np.ndarray)
+
+
+def is_torch_tensor(value: Any) -> bool:
+    torch = loaded_torch()
+    return torch is not None and isinstance(value, torch.Tensor)
+
+
 def materialize(value: Any) -> Any:
     if isinstance(value, dict) and "__type__" in value:
         if value["__type__"] == "ndarray":
+            np = get_np()
             dtype = float if value.get("dtype") == "float" else int
-            return np.array(value["data"], dtype=dtype)
+            array = np.array(value["data"], dtype=dtype)
+            return array.reshape(value["shape"]) if "shape" in value else array
         if value["__type__"] == "tensor":
+            torch = get_torch()
             dtype = torch.float32 if value.get("dtype") == "float" else torch.long
-            return torch.tensor(value["data"], dtype=dtype)
+            tensor = torch.tensor(value["data"], dtype=dtype)
+            return tensor.reshape(value["shape"]) if "shape" in value else tensor
         if value["__type__"] == "nan":
             return float("nan")
     if isinstance(value, list):
@@ -81,18 +113,20 @@ def materialize(value: Any) -> Any:
 
 
 def serialize(value: Any) -> Any:
-    if isinstance(value, np.ndarray):
+    np = loaded_np()
+    torch = loaded_torch()
+    if np is not None and isinstance(value, np.ndarray):
         dtype = "float" if value.dtype.kind == "f" else "int"
-        return {"__type__": "ndarray", "dtype": dtype, "data": value.tolist()}
-    if isinstance(value, torch.Tensor):
+        return {"__type__": "ndarray", "dtype": dtype, "shape": list(value.shape), "data": value.tolist()}
+    if torch is not None and isinstance(value, torch.Tensor):
         detached = value.detach().cpu()
         dtype = "float" if detached.dtype.is_floating_point else "int"
-        return {"__type__": "tensor", "dtype": dtype, "data": detached.tolist()}
-    if isinstance(value, (np.floating,)):
+        return {"__type__": "tensor", "dtype": dtype, "shape": list(detached.shape), "data": detached.tolist()}
+    if np is not None and isinstance(value, (np.floating,)):
         return float(value)
-    if isinstance(value, (np.integer,)):
+    if np is not None and isinstance(value, (np.integer,)):
         return int(value)
-    if isinstance(value, (np.bool_,)):
+    if np is not None and isinstance(value, (np.bool_,)):
         return bool(value)
     if isinstance(value, tuple):
         return [serialize(item) for item in value]
@@ -105,14 +139,14 @@ def serialize(value: Any) -> Any:
     return repr(value)
 
 
-def as_array(value: Any) -> np.ndarray:
-    if isinstance(value, torch.Tensor):
+def as_array(value: Any) -> Any:
+    if is_torch_tensor(value):
         return value.detach().cpu().numpy()
-    return np.asarray(value)
+    return get_np().asarray(value)
 
 
 def is_array_expected(value: Any) -> bool:
-    return isinstance(value, (np.ndarray, torch.Tensor))
+    return is_numpy_array(value) or is_torch_tensor(value)
 
 
 def compare_numbers(actual: Any, expected: Any) -> bool:
@@ -129,8 +163,9 @@ def compare_numbers(actual: Any, expected: Any) -> bool:
 
 
 def compare(actual: Any, expected: Any) -> bool:
-    if is_array_expected(expected) or isinstance(actual, (np.ndarray, torch.Tensor)):
+    if is_array_expected(expected) or is_numpy_array(actual) or is_torch_tensor(actual):
         try:
+            np = get_np()
             a = as_array(actual)
             e = as_array(expected)
             if a.shape != e.shape:
@@ -150,7 +185,7 @@ def compare(actual: Any, expected: Any) -> bool:
         return all(compare(a, e) for a, e in zip(actual, expected))
     if isinstance(expected, bool):
         return isinstance(actual, bool) and actual == expected
-    if isinstance(expected, (int, float, np.integer, np.floating)):
+    if isinstance(expected, numbers.Number):
         return compare_numbers(actual, expected)
     return actual == expected
 
@@ -165,13 +200,13 @@ def filtered_traceback(exc_type, exc, tb) -> str:
     return "".join(filtered).strip()
 
 
-def result_payload(status_code: str, status: str, results: list[dict[str, Any]], first_error=None) -> dict[str, Any]:
+def result_payload(status_code: str, status: str, results: list[dict[str, Any]], first_error=None, total_tests=None) -> dict[str, Any]:
     return {
         "status_code": status_code,
         "status": status,
         "results": results,
         "passed_tests": sum(1 for item in results if item.get("passed")),
-        "total_tests": len(results),
+        "total_tests": total_tests if total_tests is not None else len(results),
         "runtime_ms": round(sum(item.get("runtime_ms", 0) for item in results), 3),
         "first_error": first_error,
     }
@@ -211,7 +246,7 @@ def main() -> None:
             "error_message": str(exc),
             "traceback": filtered_traceback(type(exc), exc, exc.__traceback__),
         }
-        payload = result_payload("SYNTAX_ERROR", status_text["SYNTAX_ERROR"], [item], item)
+        payload = result_payload("SYNTAX_ERROR", status_text["SYNTAX_ERROR"], [item], item, len(tests))
         open(output_path, "w", encoding="utf-8").write(json.dumps(payload, ensure_ascii=False, allow_nan=True))
         return
     except Exception as exc:
@@ -227,7 +262,7 @@ def main() -> None:
             "error_message": str(exc),
             "traceback": filtered_traceback(type(exc), exc, exc.__traceback__),
         }
-        payload = result_payload("SYSTEM_ERROR", status_text["SYSTEM_ERROR"], [item], item)
+        payload = result_payload("SYSTEM_ERROR", status_text["SYSTEM_ERROR"], [item], item, len(tests))
         open(output_path, "w", encoding="utf-8").write(json.dumps(payload, ensure_ascii=False, allow_nan=True))
         return
 
@@ -250,7 +285,7 @@ def main() -> None:
             "error_message": str(exc),
             "traceback": filtered_traceback(type(exc), exc, exc.__traceback__),
         }
-        payload = result_payload("MEMORY_LIMIT_EXCEEDED", status_text["MEMORY_LIMIT_EXCEEDED"], [item], item)
+        payload = result_payload("MEMORY_LIMIT_EXCEEDED", status_text["MEMORY_LIMIT_EXCEEDED"], [item], item, len(tests))
         open(output_path, "w", encoding="utf-8").write(json.dumps(payload, ensure_ascii=False, allow_nan=True))
         return
     except Exception as exc:
@@ -266,7 +301,7 @@ def main() -> None:
             "error_message": str(exc),
             "traceback": filtered_traceback(type(exc), exc, exc.__traceback__),
         }
-        payload = result_payload("RUNTIME_ERROR", status_text["RUNTIME_ERROR"], [item], item)
+        payload = result_payload("RUNTIME_ERROR", status_text["RUNTIME_ERROR"], [item], item, len(tests))
         open(output_path, "w", encoding="utf-8").write(json.dumps(payload, ensure_ascii=False, allow_nan=True))
         return
 
@@ -298,7 +333,7 @@ def main() -> None:
             }
             results.append(item)
             if not passed:
-                payload = result_payload("WRONG_ANSWER", status_text["WRONG_ANSWER"], results, item)
+                payload = result_payload("WRONG_ANSWER", status_text["WRONG_ANSWER"], results, item, len(tests))
                 open(output_path, "w", encoding="utf-8").write(json.dumps(payload, ensure_ascii=False, allow_nan=True))
                 return
         except MemoryError as exc:
@@ -315,7 +350,7 @@ def main() -> None:
                 "traceback": filtered_traceback(type(exc), exc, exc.__traceback__),
             }
             results.append(item)
-            payload = result_payload("MEMORY_LIMIT_EXCEEDED", status_text["MEMORY_LIMIT_EXCEEDED"], results, item)
+            payload = result_payload("MEMORY_LIMIT_EXCEEDED", status_text["MEMORY_LIMIT_EXCEEDED"], results, item, len(tests))
             open(output_path, "w", encoding="utf-8").write(json.dumps(payload, ensure_ascii=False, allow_nan=True))
             return
         except Exception as exc:
@@ -332,11 +367,11 @@ def main() -> None:
                 "traceback": filtered_traceback(type(exc), exc, exc.__traceback__),
             }
             results.append(item)
-            payload = result_payload("RUNTIME_ERROR", status_text["RUNTIME_ERROR"], results, item)
+            payload = result_payload("RUNTIME_ERROR", status_text["RUNTIME_ERROR"], results, item, len(tests))
             open(output_path, "w", encoding="utf-8").write(json.dumps(payload, ensure_ascii=False, allow_nan=True))
             return
 
-    payload = result_payload("ACCEPTED", status_text["ACCEPTED"], results, None)
+    payload = result_payload("ACCEPTED", status_text["ACCEPTED"], results, None, len(tests))
     open(output_path, "w", encoding="utf-8").write(json.dumps(payload, ensure_ascii=False, allow_nan=True))
 
 
@@ -345,16 +380,32 @@ if __name__ == "__main__":
 """
 
 
-def normalize_custom_tests(custom_tests: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+def normalize_custom_tests(custom_tests: list[Any] | None) -> list[dict[str, Any]]:
     if not custom_tests:
         return []
     normalized = []
     for item in custom_tests[:20]:
-        if "args" not in item:
+        if not isinstance(item, dict):
+            normalized.append({"args": [item], "kwargs": {}})
             continue
+        if "args" not in item:
+            if "input" in item:
+                normalized.append(
+                    {
+                        "args": [item["input"]],
+                        "kwargs": item.get("kwargs", {}),
+                        **({"expected": item["expected"]} if "expected" in item else {}),
+                    }
+                )
+            else:
+                normalized.append({"args": [item], "kwargs": {}})
+            continue
+        args = item.get("args", [])
+        if not isinstance(args, list):
+            args = [args]
         normalized.append(
             {
-                "args": item.get("args", []),
+                "args": args,
                 "kwargs": item.get("kwargs", {}),
                 **({"expected": item["expected"]} if "expected" in item else {}),
             }
