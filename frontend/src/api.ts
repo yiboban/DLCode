@@ -21,8 +21,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (!response.ok) {
     let message = "请求失败";
     try {
-      const body = (await response.json()) as { message?: string; detail?: string };
-      message = body.message ?? body.detail ?? message;
+      const body = (await response.json()) as { message?: unknown; detail?: unknown };
+      const rawMessage = body.message ?? body.detail;
+      if (typeof rawMessage === "string") {
+        message = rawMessage;
+      } else if (rawMessage) {
+        message = JSON.stringify(rawMessage, null, 2);
+      }
     } catch {
       message = await response.text();
     }
@@ -60,7 +65,7 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ code }),
     }),
-  run: (problemId: number, code: string, custom_tests?: Array<Record<string, unknown>>) =>
+  run: (problemId: number, code: string, custom_tests?: unknown[]) =>
     request<JudgeResponse>("/api/run", {
       method: "POST",
       body: JSON.stringify({ problem_id: problemId, code, custom_tests }),

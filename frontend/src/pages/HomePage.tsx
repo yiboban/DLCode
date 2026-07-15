@@ -6,14 +6,19 @@ import type { StatisticsResponse } from "../types";
 import { statusClass } from "../utils";
 
 const paths = [
-  "Python 与 NumPy 基础",
-  "机器学习算法手撕",
-  "神经网络基础",
+  "Python 与 PyTorch 基础",
+  "传统机器学习",
+  "深度学习基础",
   "PyTorch 基础",
-  "注意力机制与 Transformer",
+  "Attention 与 Transformer",
+  "大模型核心组件",
+  "大模型推理与解码",
+  "优化器与训练",
+  "多模态与表征学习",
+  "模型压缩与部署",
   "计算机视觉",
   "自然语言处理",
-  "模型训练与调试",
+  "训练、调试与工程",
 ];
 
 export default function HomePage() {

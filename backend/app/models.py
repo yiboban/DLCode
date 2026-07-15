@@ -23,6 +23,7 @@ class Problem(Base):
     starter_code: Mapped[str] = mapped_column(Text)
     solution_code: Mapped[str] = mapped_column(Text)
     explanation: Mapped[str] = mapped_column(Text)
+    presentation: Mapped[dict] = mapped_column(JSON, default=dict)
     constraints: Mapped[list[str]] = mapped_column(JSON)
     examples: Mapped[list[dict]] = mapped_column(JSON)
     public_tests: Mapped[list[dict]] = mapped_column(JSON)

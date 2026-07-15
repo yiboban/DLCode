@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import ast
 from contextlib import asynccontextmanager
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import func, select
+from sqlalchemy import func, inspect, select, text
 from sqlalchemy.orm import Session
 
 from .database import Base, SessionLocal, engine, get_db
@@ -33,8 +34,29 @@ def acceptance_rate(problem: Problem) -> float:
     return round(problem.pass_count / problem.submit_count * 100, 2)
 
 
+def is_untouched_placeholder(code: str) -> bool:
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return False
+    functions = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    if not functions:
+        return False
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and len(node.body) == 1 and isinstance(node.body[0], ast.Pass):
+            continue
+        return False
+    return True
+
+
 def seed_database() -> None:
     Base.metadata.create_all(bind=engine)
+    columns = {column["name"] for column in inspect(engine).get_columns("problems")}
+    if "presentation" not in columns:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE problems ADD COLUMN presentation JSON"))
     problems = get_seed_problems()
     with SessionLocal() as db:
         for data in problems:
@@ -46,6 +68,12 @@ def seed_database() -> None:
                 if key in {"pass_count", "submit_count"}:
                     continue
                 setattr(problem, key, value)
+        db.flush()
+        for draft in db.scalars(select(Draft)).all():
+            if is_untouched_placeholder(draft.code):
+                problem = db.get(Problem, draft.problem_id)
+                if problem is not None:
+                    draft.code = problem.starter_code
         db.commit()
 
 
@@ -64,7 +92,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origin_regex=r"^http://(localhost|127\.0\.0\.1):\d+$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -122,6 +150,7 @@ def to_problem_detail(problem: Problem, completed: bool) -> ProblemDetail:
         function_signature=problem.function_signature,
         starter_code=problem.starter_code,
         explanation=problem.explanation,
+        presentation=problem.presentation or {"formulas": [], "symbols": [], "steps": [problem.explanation]},
         constraints=problem.constraints,
         examples=problem.examples,
         public_tests=problem.public_tests,
@@ -130,6 +159,30 @@ def to_problem_detail(problem: Problem, completed: bool) -> ProblemDetail:
         acceptance_rate=acceptance_rate(problem),
         completed=completed,
     )
+
+
+def complete_expected_outputs(problem: Problem, tests: list[dict]) -> list[dict]:
+    missing_indices = [index for index, test in enumerate(tests) if test.get("expected") is None]
+    if not missing_indices:
+        return tests
+
+    solution_result = judge_code(problem, problem.solution_code, tests, timeout_multiplier=4.0)
+    if solution_result.get("status_code") != "ACCEPTED":
+        raise HTTPException(
+            status_code=500,
+            detail={"message": "参考答案无法生成自定义测试的预期输出，请检查输入格式。"},
+        )
+
+    results = solution_result.get("results", [])
+    enriched: list[dict] = []
+    for index, test in enumerate(tests):
+        next_test = dict(test)
+        if index in missing_indices:
+            if index >= len(results):
+                raise HTTPException(status_code=500, detail={"message": "参考答案生成的测试结果数量不一致。"})
+            next_test["expected"] = results[index].get("actual_output")
+        enriched.append(next_test)
+    return enriched
 
 
 @app.get("/api/health")
@@ -198,7 +251,7 @@ def get_problem(slug: str, db: DbDep) -> ProblemDetail:
 def run_code(payload: RunRequest, db: DbDep) -> JudgeResponse:
     problem = get_problem_or_404(db, payload.problem_id)
     custom_tests = normalize_custom_tests(payload.custom_tests)
-    tests = custom_tests if custom_tests else problem.public_tests
+    tests = complete_expected_outputs(problem, custom_tests) if custom_tests else problem.public_tests
     result = judge_code(problem, payload.code, tests, timeout_multiplier=1.0)
     return JudgeResponse(**result)
 

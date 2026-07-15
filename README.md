@@ -1,6 +1,6 @@
 # DLCode：深度学习手撕题库
 
-DLCode 是一个本地运行的机器学习编程题练习网站，用于练习 Python、NumPy、传统机器学习、深度学习、PyTorch、Attention、Transformer、计算机视觉、自然语言处理和训练调试相关手撕题。
+DLCode 是一个本地运行的机器学习编程题练习网站，用于练习 Python、PyTorch、传统机器学习、深度学习、Attention、Transformer、现代大模型组件、计算机视觉、自然语言处理和训练调试相关手撕题。
 
 项目交互方式参考主流在线判题产品，但不使用 LeetCode 的商标、Logo、页面代码或受版权保护题目内容。首批题目来自常见公开知识点整理与原创改编，公司标签仅表示相似高频方向，不声明为真实公司原题。
 
@@ -20,7 +20,7 @@ DLCode 是一个本地运行的机器学习编程题练习网站，用于练习 
 - 后端：FastAPI、Pydantic
 - 数据库：SQLite、SQLAlchemy
 - 判题语言：Python 3
-- 数值库：NumPy、PyTorch
+- 数值库：PyTorch 优先，判题器兼容 NumPy
 - 测试：pytest、前端 TypeScript 构建校验
 
 ## 项目目录结构
@@ -33,7 +33,7 @@ DLCode/
       judge.py           # 本地 Python 判题核心
       models.py          # SQLAlchemy 数据模型
       schemas.py         # Pydantic 请求与响应模型
-      problem_bank.py    # 首批 60 道结构化题目
+      problem_bank.py    # 80 道结构化题目、公式与测试
       database.py        # SQLite 连接
     tests/
       test_api.py        # 后端接口与判题测试
@@ -120,18 +120,32 @@ npm --prefix frontend run build
 
 ## 题库规模
 
-首批内置 60 道可运行、可提交的题目：
+内置 80 道可运行、可提交的题目，其中 64 道包含结构化 LaTeX 公式与符号说明：
 
-- Python 与 NumPy 基础：10 道
+- Python 与 PyTorch 基础：10 道
 - 传统机器学习：10 道
-- 深度学习基础：10 道
-- PyTorch 基础：10 道
+- 深度学习基础：11 道
+- PyTorch 基础：11 道
 - Attention 与 Transformer：8 道
-- 计算机视觉：5 道
+- 大模型核心组件：4 道
+- 优化器与训练：4 道
+- 计算机视觉：8 道
 - 自然语言处理：4 道
-- 训练、调试与工程：3 道
+- 训练、调试与工程：4 道
+- 大模型评估、推理与解码：3 道
+- 多模态与表征学习：1 道
+- 模型压缩与部署：2 道
 
 每题包含 3 个公开测试和 5 个隐藏测试。普通题目接口不会返回 `solution_code` 和 `hidden_tests`。
+
+## 题目调研来源与边界
+
+题目按公开资料中的能力方向原创改编，不复制受版权保护的面试原题，也不把公司标签表述为真实出题记录。主要参考：
+
+- [Amazon Applied Scientist Interview Prep](https://amazon.jobs/content/en/how-we-hire/applied-scientist-interview-prep) 与 [Meta 技术面试准备](https://engineering.fb.com/2012/07/20/uncategorized/get-that-job-at-facebook/)：编码、问题求解、知识深度与广度。
+- [Attention Is All You Need](https://arxiv.org/abs/1706.03762)、[RMSNorm](https://arxiv.org/abs/1910.07467)、[RoFormer / RoPE](https://arxiv.org/abs/2104.09864)、[LoRA](https://arxiv.org/abs/2106.09685)：Transformer 与现代大模型核心组件。
+- [Focal Loss](https://arxiv.org/abs/1708.02002)、[AdamW](https://arxiv.org/abs/1711.05101)、[OpenAI CLIP](https://openai.com/index/clip/)：视觉、优化器与多模态训练目标。
+- [PyTorch 官方文档](https://docs.pytorch.org/docs/stable/nn.functional.html)：模板、参考实现和数值边界与当前 PyTorch 接口保持一致。
 
 ## 添加新题目的方法
 
@@ -141,7 +155,8 @@ npm --prefix frontend run build
 2. 提供 `slug`、`title`、`difficulty`、`category`、`function_name`、`signature`、中文 `description`、`solution_code`、`explanation`、`constraints`。
 3. 提供至少 8 个 `raw_cases`，前 3 个会作为公开测试，后 5 个作为隐藏测试。
 4. 提供 `reference` 函数，启动时会用它生成测试期望值。
-5. 重启后端，数据库会按 `slug` 同步题目信息。
+5. 对依赖数学定义的题，在 `PRESENTATIONS` 中补充 `formulas`、`symbols` 和 `steps`。
+6. 重启后端，数据库会按 `slug` 同步题目信息。
 
 后续更适合把每题拆成独立 JSON/YAML 文件或 Python 模块，使扩展更细粒度。
 
