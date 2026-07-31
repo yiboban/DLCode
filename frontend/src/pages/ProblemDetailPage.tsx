@@ -1,6 +1,6 @@
 import Editor from "@monaco-editor/react";
 import type { editor as MonacoEditor } from "monaco-editor";
-import { Copy, Loader2, Play, RotateCcw, Send, Settings } from "lucide-react";
+import { BookOpen, Brain, ChevronDown, Code2, Copy, Loader2, Play, RotateCcw, Send, Settings, Star, Wrench } from "lucide-react";
 import { BlockMath } from "react-katex";
 import { useCallback, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
@@ -103,6 +103,11 @@ function normalizeCustomTestInput(parsed: unknown, problem: ProblemDetail): Arra
   return [normalizeDirectInput(parsed, problem)];
 }
 
+function formatDefaultTestCase(value: unknown): string {
+  const compact = JSON.stringify(value) ?? "";
+  return compact.length <= 160 ? compact : JSON.stringify(value, null, 2) ?? "";
+}
+
 export default function ProblemDetailPage() {
   const { slug = "" } = useParams();
   const [problem, setProblem] = useState<ProblemDetail | null>(null);
@@ -115,6 +120,7 @@ export default function ProblemDetailPage() {
   const [submitResult, setSubmitResult] = useState<JudgeResponse | null>(null);
   const [loadingRun, setLoadingRun] = useState(false);
   const [loadingSubmit, setLoadingSubmit] = useState(false);
+  const [favoritePending, setFavoritePending] = useState(false);
   const [error, setError] = useState("");
   const [draftLoaded, setDraftLoaded] = useState(false);
   const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
@@ -129,10 +135,12 @@ export default function ProblemDetailPage() {
     setRunResult(null);
     setSubmitResult(null);
     setError("");
+    setCustomTests("");
     api
       .problem(slug)
       .then(async (item) => {
         setProblem(item);
+        setCustomTests(formatDefaultTestCase(item.default_test_case));
         const draft = await api.draft(item.id);
         setCode(draft.code || item.starter_code);
         setDraftLoaded(true);
@@ -234,6 +242,23 @@ export default function ProblemDetailPage() {
     }
   }, [code, highlightError, loadingRun, loadingSubmit, problem]);
 
+  async function toggleFavorite() {
+    if (!problem || favoritePending) return;
+    const previous = problem.favorited;
+    const nextValue = !previous;
+    setFavoritePending(true);
+    setProblem({ ...problem, favorited: nextValue });
+    try {
+      await api.setFavorite(problem.id, nextValue);
+      setError("");
+    } catch (err) {
+      setProblem((current) => (current ? { ...current, favorited: previous } : current));
+      setError(err instanceof Error ? err.message : "收藏状态更新失败");
+    } finally {
+      setFavoritePending(false);
+    }
+  }
+
   useEffect(() => {
     runCodeRef.current = runCode;
     submitCodeRef.current = submitCode;
@@ -282,6 +307,20 @@ export default function ProblemDetailPage() {
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <h1 className="mr-2 text-2xl font-bold">{problem.title}</h1>
+            <button
+              type="button"
+              onClick={() => void toggleFavorite()}
+              disabled={favoritePending}
+              aria-label={problem.favorited ? `取消收藏 ${problem.title}` : `收藏 ${problem.title}`}
+              title={problem.favorited ? "取消收藏" : "加入收藏"}
+              className={`inline-flex h-8 w-8 items-center justify-center rounded-md border transition disabled:opacity-50 ${
+                problem.favorited
+                  ? "border-amber-300 bg-amber-50 text-amber-500 dark:border-amber-800 dark:bg-amber-950/30"
+                  : "border-zinc-200 text-zinc-400 hover:border-amber-300 hover:text-amber-500 dark:border-zinc-700"
+              }`}
+            >
+              <Star size={18} fill={problem.favorited ? "currentColor" : "none"} />
+            </button>
             <span className={`rounded px-2 py-1 text-xs ${difficultyClass(problem.difficulty)}`}>{problem.difficulty}</span>
             {problem.completed && (
               <span className="rounded bg-emerald-50 px-2 py-1 text-xs text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
@@ -335,6 +374,7 @@ export default function ProblemDetailPage() {
               {problem.categories.join("、")}；{problem.source_note}
             </p>
           </InfoBlock>
+          <LectureBlock problem={problem} />
         </section>
 
         <div
@@ -410,7 +450,17 @@ export default function ProblemDetailPage() {
           >
             <div className="grid min-h-0 gap-4 xl:grid-cols-[0.85fr_1.15fr]">
               <div>
-                <label className="mb-2 block text-sm font-semibold">自定义测试用例</label>
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <label className="block text-sm font-semibold">自定义测试用例</label>
+                  <button
+                    type="button"
+                    onClick={() => setCustomTests(formatDefaultTestCase(problem.default_test_case))}
+                    className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-zinc-500 hover:bg-zinc-100 hover:text-moss dark:hover:bg-zinc-800"
+                  >
+                    <RotateCcw size={13} />
+                    恢复默认样例
+                  </button>
+                </div>
                 <textarea
                   value={customTests}
                   onChange={(event) => setCustomTests(event.target.value)}
@@ -509,6 +559,120 @@ function AlgorithmBlock({ problem }: { problem: ProblemDetail }) {
         </ol>
       </div>
     </InfoBlock>
+  );
+}
+
+function LectureBlock({ problem }: { problem: ProblemDetail }) {
+  const { lecture } = problem;
+  return (
+    <InfoBlock title="讲义">
+      <div className="overflow-hidden rounded-xl border border-emerald-200/80 bg-emerald-50/40 dark:border-emerald-900 dark:bg-emerald-950/10">
+        <div className="border-b border-emerald-100 px-4 py-3 dark:border-emerald-900">
+          <div className="font-medium text-zinc-800 dark:text-zinc-100">先独立完成，再按需展开</div>
+          <p className="mt-1 text-xs leading-6 text-zinc-500 dark:text-zinc-400">
+            题解、函数说明和参考实现默认收起，建议至少运行一次自己的代码后再查看。
+          </p>
+        </div>
+        <div className="space-y-2 p-3">
+          <LectureSection icon={BookOpen} title="题解思路" subtitle="从公式到实现的完整路径">
+            <ol className="list-decimal space-y-2 pl-5 text-sm leading-7">
+              {lecture.solution.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+            </ol>
+          </LectureSection>
+
+          <LectureSection icon={Wrench} title="用到的函数讲解" subtitle="理解 API，而不是只背函数名">
+            <div className="space-y-2">
+              {lecture.functions.map((item) => (
+                <div key={item.name} className="rounded-lg bg-zinc-50 px-3 py-2 dark:bg-zinc-950">
+                  <code className="font-semibold text-moss dark:text-emerald-300">{item.name}</code>
+                  <p className="mt-1 text-xs leading-6 text-zinc-600 dark:text-zinc-300">{item.description}</p>
+                </div>
+              ))}
+            </div>
+          </LectureSection>
+
+          <LectureSection
+            icon={Code2}
+            title={lecture.solutions.length > 1 ? "参考实现（手搓 + API）" : "参考实现"}
+            subtitle={lecture.solutions.length > 1 ? "先理解手搓原理，再掌握工程写法" : "用于复盘，请先尝试自己完成"}
+          >
+            <div className="space-y-4">
+              {lecture.solutions.map((solution) => (
+                <div key={solution.kind} className="overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-800">
+                  <div className="flex flex-wrap items-start justify-between gap-2 bg-zinc-50 px-3 py-2 dark:bg-zinc-950">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={
+                            solution.kind === "manual"
+                              ? "rounded bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800 dark:bg-amber-950/60 dark:text-amber-300"
+                              : solution.kind === "api"
+                                ? "rounded bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300"
+                                : "rounded bg-zinc-200 px-2 py-0.5 text-xs font-semibold text-zinc-700 dark:bg-zinc-800 dark:text-zinc-200"
+                          }
+                        >
+                          {solution.title}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-xs leading-5 text-zinc-500">{solution.summary}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => navigator.clipboard.writeText(solution.code)}
+                      className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-zinc-500 hover:bg-white hover:text-moss dark:hover:bg-zinc-900"
+                    >
+                      <Copy size={13} />
+                      复制代码
+                    </button>
+                  </div>
+                  <pre className="scrollbar-thin max-h-96 overflow-auto bg-zinc-950 p-3 font-mono text-xs leading-6 text-zinc-100">
+                    <code>{solution.code}</code>
+                  </pre>
+                </div>
+              ))}
+            </div>
+          </LectureSection>
+
+          <LectureSection icon={Brain} title="如何巩固记忆" subtitle="把会看变成能独立写">
+            <ul className="list-disc space-y-2 pl-5 text-sm leading-7">
+              {lecture.memory_tips.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+            </ul>
+          </LectureSection>
+        </div>
+      </div>
+    </InfoBlock>
+  );
+}
+
+function LectureSection({
+  icon: Icon,
+  title,
+  subtitle,
+  children,
+}: {
+  icon: typeof BookOpen;
+  title: string;
+  subtitle: string;
+  children: ReactNode;
+}) {
+  return (
+    <details className="group overflow-hidden rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+      <summary className="flex cursor-pointer list-none items-center gap-3 px-3 py-3 [&::-webkit-details-marker]:hidden">
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-moss dark:bg-emerald-950/50 dark:text-emerald-300">
+          <Icon size={17} />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block text-sm font-semibold text-zinc-800 dark:text-zinc-100">{title}</span>
+          <span className="mt-0.5 block text-xs text-zinc-500">{subtitle}</span>
+        </span>
+        <ChevronDown size={16} className="shrink-0 text-zinc-400 transition-transform group-open:rotate-180" />
+      </summary>
+      <div className="border-t border-zinc-100 px-4 py-3 text-zinc-700 dark:border-zinc-800 dark:text-zinc-300">{children}</div>
+    </details>
   );
 }
 

@@ -56,6 +56,7 @@ class ProblemProgress(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     problem_id: Mapped[int] = mapped_column(ForeignKey("problems.id"), index=True)
     completed: Mapped[bool] = mapped_column(Boolean, default=False)
+    favorited: Mapped[bool] = mapped_column(Boolean, default=False)
     last_status: Mapped[str | None] = mapped_column(String(40), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

@@ -11,11 +11,14 @@ from sqlalchemy.orm import Session
 
 from .database import Base, SessionLocal, engine, get_db
 from .judge import judge_code, normalize_custom_tests
+from .lecture import build_problem_lecture
 from .models import Draft, Problem, ProblemProgress, Submission
 from .problem_bank import get_seed_problems
 from .schemas import (
     DraftRequest,
     DraftResponse,
+    FavoriteRequest,
+    FavoriteResponse,
     JudgeResponse,
     ProblemDetail,
     ProblemListItem,
@@ -57,6 +60,10 @@ def seed_database() -> None:
     if "presentation" not in columns:
         with engine.begin() as connection:
             connection.execute(text("ALTER TABLE problems ADD COLUMN presentation JSON"))
+    progress_columns = {column["name"] for column in inspect(engine).get_columns("problem_progress")}
+    if "favorited" not in progress_columns:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE problem_progress ADD COLUMN favorited BOOLEAN NOT NULL DEFAULT 0"))
     problems = get_seed_problems()
     with SessionLocal() as db:
         for data in problems:
@@ -120,7 +127,12 @@ def completed_map(db: Session) -> dict[int, bool]:
     return {row.problem_id: row.completed for row in rows}
 
 
-def to_problem_item(problem: Problem, completed: bool) -> ProblemListItem:
+def favorited_map(db: Session) -> dict[int, bool]:
+    rows = db.scalars(select(ProblemProgress)).all()
+    return {row.problem_id: row.favorited for row in rows}
+
+
+def to_problem_item(problem: Problem, completed: bool, favorited: bool) -> ProblemListItem:
     return ProblemListItem(
         id=problem.id,
         slug=problem.slug,
@@ -131,12 +143,22 @@ def to_problem_item(problem: Problem, completed: bool) -> ProblemListItem:
         source_note=problem.source_note,
         acceptance_rate=acceptance_rate(problem),
         completed=completed,
+        favorited=favorited,
         submit_count=problem.submit_count,
         pass_count=problem.pass_count,
     )
 
 
-def to_problem_detail(problem: Problem, completed: bool) -> ProblemDetail:
+def to_problem_detail(problem: Problem, completed: bool, favorited: bool) -> ProblemDetail:
+    presentation = problem.presentation or {"formulas": [], "symbols": [], "steps": [problem.explanation]}
+    first_public_test = problem.public_tests[0] if problem.public_tests else {"args": [], "kwargs": {}}
+    args = first_public_test.get("args", [])
+    kwargs = first_public_test.get("kwargs", {})
+    if len(args) == 1:
+        default_test_case = {"input": args[0], **({"kwargs": kwargs} if kwargs else {})}
+    else:
+        default_test_case = {"args": args, "kwargs": kwargs}
+
     return ProblemDetail(
         id=problem.id,
         slug=problem.slug,
@@ -150,14 +172,23 @@ def to_problem_detail(problem: Problem, completed: bool) -> ProblemDetail:
         function_signature=problem.function_signature,
         starter_code=problem.starter_code,
         explanation=problem.explanation,
-        presentation=problem.presentation or {"formulas": [], "symbols": [], "steps": [problem.explanation]},
+        presentation=presentation,
+        lecture=build_problem_lecture(
+            slug=problem.slug,
+            explanation=problem.explanation,
+            presentation=presentation,
+            solution_code=problem.solution_code,
+            categories=problem.categories,
+        ),
         constraints=problem.constraints,
         examples=problem.examples,
         public_tests=problem.public_tests,
+        default_test_case=default_test_case,
         time_limit=problem.time_limit,
         memory_limit=problem.memory_limit,
         acceptance_rate=acceptance_rate(problem),
         completed=completed,
+        favorited=favorited,
     )
 
 
@@ -203,6 +234,7 @@ def list_problems(
 ) -> ProblemsResponse:
     problems = list(db.scalars(select(Problem)).all())
     progress = completed_map(db)
+    favorites = favorited_map(db)
 
     def match(problem: Problem) -> bool:
         if search and search.strip().lower() not in problem.title.lower() and search.strip() not in str(problem.id):
@@ -233,7 +265,7 @@ def list_problems(
     all_categories = sorted({cat for problem in problems for cat in problem.categories})
     all_companies = sorted({tag for problem in problems for tag in problem.company_tags})
     return ProblemsResponse(
-        items=[to_problem_item(problem, progress.get(problem.id, False)) for problem in filtered],
+        items=[to_problem_item(problem, progress.get(problem.id, False), favorites.get(problem.id, False)) for problem in filtered],
         total=len(filtered),
         categories=all_categories,
         companies=all_companies,
@@ -244,7 +276,35 @@ def list_problems(
 def get_problem(slug: str, db: DbDep) -> ProblemDetail:
     problem = get_problem_by_slug_or_404(db, slug)
     progress = completed_map(db)
-    return to_problem_detail(problem, progress.get(problem.id, False))
+    favorites = favorited_map(db)
+    return to_problem_detail(problem, progress.get(problem.id, False), favorites.get(problem.id, False))
+
+
+@app.get("/api/favorites", response_model=list[ProblemListItem])
+def list_favorites(db: DbDep) -> list[ProblemListItem]:
+    rows = list(
+        db.scalars(
+            select(Problem)
+            .join(ProblemProgress, ProblemProgress.problem_id == Problem.id)
+            .where(ProblemProgress.favorited.is_(True))
+            .order_by(ProblemProgress.updated_at.desc(), Problem.id.asc())
+        ).all()
+    )
+    progress = completed_map(db)
+    return [to_problem_item(problem, progress.get(problem.id, False), True) for problem in rows]
+
+
+@app.put("/api/favorites/{problem_id}", response_model=FavoriteResponse)
+def set_favorite(problem_id: int, payload: FavoriteRequest, db: DbDep) -> FavoriteResponse:
+    problem = get_problem_or_404(db, problem_id)
+    progress = db.scalar(select(ProblemProgress).where(ProblemProgress.problem_id == problem.id))
+    if progress is None:
+        progress = ProblemProgress(problem_id=problem.id, completed=False, favorited=payload.favorited)
+        db.add(progress)
+    else:
+        progress.favorited = payload.favorited
+    db.commit()
+    return FavoriteResponse(problem_id=problem.id, favorited=payload.favorited)
 
 
 @app.post("/api/run", response_model=JudgeResponse)

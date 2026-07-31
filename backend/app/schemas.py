@@ -19,6 +19,7 @@ class ProblemListItem(BaseModel):
     source_note: str
     acceptance_rate: float
     completed: bool
+    favorited: bool
     submit_count: int
     pass_count: int
 
@@ -32,6 +33,25 @@ class ProblemPresentation(BaseModel):
     formulas: list[FormulaItem] = Field(default_factory=list)
     symbols: list[str] = Field(default_factory=list)
     steps: list[str] = Field(default_factory=list)
+
+
+class FunctionNote(BaseModel):
+    name: str
+    description: str
+
+
+class SolutionVariant(BaseModel):
+    kind: str
+    title: str
+    summary: str
+    code: str
+
+
+class ProblemLecture(BaseModel):
+    solution: list[str] = Field(default_factory=list)
+    functions: list[FunctionNote] = Field(default_factory=list)
+    memory_tips: list[str] = Field(default_factory=list)
+    solutions: list[SolutionVariant] = Field(default_factory=list)
 
 
 class ProblemDetail(BaseModel):
@@ -48,13 +68,16 @@ class ProblemDetail(BaseModel):
     starter_code: str
     explanation: str
     presentation: ProblemPresentation
+    lecture: ProblemLecture
     constraints: list[str]
     examples: list[dict[str, Any]]
     public_tests: list[dict[str, Any]]
+    default_test_case: Any
     time_limit: float
     memory_limit: int
     acceptance_rate: float
     completed: bool
+    favorited: bool
 
 
 class ProblemsResponse(BaseModel):
@@ -66,6 +89,15 @@ class ProblemsResponse(BaseModel):
 
 class DraftRequest(BaseModel):
     code: str = Field(min_length=0)
+
+
+class FavoriteRequest(BaseModel):
+    favorited: bool
+
+
+class FavoriteResponse(BaseModel):
+    problem_id: int
+    favorited: bool
 
 
 class DraftResponse(BaseModel):

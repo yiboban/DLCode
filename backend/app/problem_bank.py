@@ -359,6 +359,66 @@ PRESENTATIONS: dict[str, dict[str, list[Any]]] = {
         "symbols": ["b=num_bits，Q=2^{b−1}−1；全零输入直接返回全零。"],
         "steps": ["由最大绝对值计算对称量化 scale。", "舍入并截断到整数范围。", "乘 scale 得到反量化结果。"],
     },
+    "roi-align-single": {
+        "formulas": [formula(r"x_{ij}=x_1+\left(j+\frac12\right)\frac{x_2-x_1}{W_o},\qquad y_{ij}=y_1+\left(i+\frac12\right)\frac{y_2-y_1}{H_o}"), formula(r"f(x,y)=\sum_{a\in\{0,1\}}\sum_{b\in\{0,1\}}w_{ab}f(x_a,y_b)")],
+        "symbols": ["(x₁,y₁,x₂,y₂) 是连续坐标 ROI；Hₒ、Wₒ 是输出尺寸；w 是双线性插值权重。"],
+        "steps": ["把 ROI 均匀划分为输出网格。", "在每个网格中心采样。", "用相邻四个像素做双线性插值。"],
+    },
+    "clip-symmetric-loss": {
+        "formulas": [formula(r"S_{ij}=\frac{\hat I_i^\top\hat T_j}{\tau}"), formula(r"L=\frac12\left(\operatorname{CE}(S,[0,\ldots,N-1])+\operatorname{CE}(S^\top,[0,\ldots,N-1])\right)")],
+        "symbols": ["Î、T̂ 是 L2 归一化后的图像和文本向量；τ 是温度；同下标样本构成正对。"],
+        "steps": ["分别归一化图像和文本 embedding。", "构造两两相似度矩阵。", "对图搜文和文搜图两个方向的交叉熵取平均。"],
+    },
+    "multi-head-self-attention": {
+        "formulas": [formula(r"\operatorname{head}_h=\operatorname{softmax}\left(\frac{Q_hK_h^\top}{\sqrt{d_h}}\right)V_h"), formula(r"\operatorname{MHA}(Q,K,V)=\operatorname{Concat}(\operatorname{head}_1,\ldots,\operatorname{head}_H)")],
+        "symbols": ["H 是头数；d_h=d_{model}/H；本题输入已完成 Q、K、V 线性投影，不再做输出投影。"],
+        "steps": ["把最后一维拆成多个头。", "逐头计算缩放点积和稳定 Softmax。", "加权 V 后按原顺序合并各头。"],
+    },
+    "multiclass-nms": {
+        "formulas": [formula(r"\operatorname{IoU}(A,B)=\frac{|A\cap B|}{|A\cup B|}"), formula(r"\text{keep }j\iff \operatorname{IoU}(b_i,b_j)\le\theta\quad\text{或}\quad c_i\ne c_j")],
+        "symbols": ["NMS 只在相同类别内部抑制；最终结果按分数降序返回原下标。"],
+        "steps": ["按类别拆分候选框。", "每类按分数从高到低做 NMS。", "合并保留下标并再次按全局分数排序。"],
+    },
+    "sft-shifted-loss": {
+        "formulas": [formula(r"L=-\frac1M\sum_{b,t\in\mathcal V}\log\operatorname{softmax}(z_{b,t})_{\,x_{b,t+1}}")],
+        "symbols": ["位置 t 的 logits 预测位置 t+1 的 token；𝒱 是标签不等于 ignore_index 的位置集合。"],
+        "steps": ["去掉最后一个 logits，并去掉第一个 token 标签。", "过滤 ignore_index。", "对剩余 token 的交叉熵取平均。"],
+    },
+    "ppo-clipped-loss": {
+        "formulas": [formula(r"r_t(\theta)=\exp(\log\pi_\theta(a_t|s_t)-\log\pi_{old}(a_t|s_t))"), formula(r"L=-\mathbb E_t\left[\min\left(r_tA_t,\operatorname{clip}(r_t,1-\epsilon,1+\epsilon)A_t\right)\right]")],
+        "symbols": ["Aₜ 是优势；ε 是 PPO 截断范围；返回要最小化的负目标。"],
+        "steps": ["由新旧 log probability 计算概率比。", "分别计算原始与截断代理目标。", "逐元素取较小值后求负均值。"],
+    },
+    "generalized-advantage-estimation": {
+        "formulas": [formula(r"\delta_t=r_t+\gamma(1-d_t)V_{t+1}-V_t"), formula(r"A_t=\delta_t+\gamma\lambda(1-d_t)A_{t+1}")],
+        "symbols": ["values 比 rewards 多一个 bootstrap 值；dₜ 表示该步是否终止。"],
+        "steps": ["从轨迹末尾向前遍历。", "先算一步 TD 误差。", "用 γλ 递推累积优势，并在终止处截断。"],
+    },
+    "dpo-loss": {
+        "formulas": [formula(r"m=\beta\left[(\log\pi(y_w|x)-\log\pi(y_l|x))-(\log\pi_{ref}(y_w|x)-\log\pi_{ref}(y_l|x))\right]"), formula(r"L=-\mathbb E[\log\sigma(m)]=\mathbb E[\log(1+e^{-m})]")],
+        "symbols": ["y_w、y_l 分别是 chosen 与 rejected 回答；β 控制偏离参考模型的强度。"],
+        "steps": ["计算策略模型的偏好差。", "减去参考模型的偏好差并乘 β。", "应用二分类 logistic loss。"],
+    },
+    "grpo-clipped-loss": {
+        "formulas": [formula(r"A_{g,i}=\frac{r_{g,i}-\mu_g}{\sqrt{\frac1K\sum_j(r_{g,j}-\mu_g)^2}+\varepsilon}"), formula(r"L=-\mathbb E_{g,i}\left[\min(\rho_{g,i}A_{g,i},\operatorname{clip}(\rho_{g,i},1-\epsilon,1+\epsilon)A_{g,i})\right]")],
+        "symbols": ["同一 prompt 的 K 个回答构成一组；ρ=exp(new_log_prob−old_log_prob)。"],
+        "steps": ["在每组内部标准化 reward 得到相对优势。", "计算新旧策略概率比。", "使用与 PPO 相同的截断代理目标。"],
+    },
+    "kv-cache-append": {
+        "formulas": [formula(r"K_{cache}'=\operatorname{Concat}(K_{cache},K_{new},\operatorname{dim}=2),\qquad V_{cache}'=\operatorname{Concat}(V_{cache},V_{new},\operatorname{dim}=2)")],
+        "symbols": ["Tensor 形状为 (batch, heads, sequence, head_dim)，序列维是 dim=2。"],
+        "steps": ["保持 batch、head 和 head_dim 不变。", "只沿序列维追加新 token 的 K、V。", "返回更新后的两个缓存。"],
+    },
+    "multi-query-attention": {
+        "formulas": [formula(r"O_h=\operatorname{softmax}\left(\frac{Q_hK^\top}{\sqrt d}\right)V")],
+        "symbols": ["每个查询头有独立 Q_h，但所有头共享同一组 K、V。"],
+        "steps": ["给共享 K、V 增加 head 广播维。", "各查询头独立计算注意力权重。", "使用共享 V 得到每个头的输出。"],
+    },
+    "flash-attention-online": {
+        "formulas": [formula(r"m^{new}=\max(m,\max s),\quad \ell^{new}=e^{m-m^{new}}\ell+\sum_j e^{s_j-m^{new}}"), formula(r"a^{new}=e^{m-m^{new}}a+\sum_j e^{s_j-m^{new}}v_j,\qquad o=a/\ell")],
+        "symbols": ["s 是当前 K/V 分块的注意力分数；m、ℓ、a 分别维护在线最大值、指数和与加权和。"],
+        "steps": ["按 block_size 遍历 K、V，避免保存完整注意力矩阵。", "用新最大值重标定旧统计量。", "累计归一化分母与 V 加权和，最后相除。"],
+    },
 }
 
 
@@ -2926,5 +2986,658 @@ def dataset_snapshot(values: list[Any]) -> dict[str, Any]:
         company_tags=["NVIDIA", "Microsoft", "华为", "阿里巴巴"],
     )
 
-    assert len(problems) == 80
+    def ref_roi_align_single(feature: Any, box: list[float], output_size: list[int]) -> torch.Tensor:
+        x = torch.as_tensor(feature, dtype=torch.float64)
+        x1, y1, x2, y2 = map(float, box)
+        out_h, out_w = output_size
+        height, width = x.shape
+        out = torch.empty((out_h, out_w), dtype=x.dtype)
+        for row in range(out_h):
+            sample_y = y1 + (row + 0.5) * (y2 - y1) / out_h
+            sample_y = min(max(sample_y, 0.0), height - 1.0)
+            y_low = math.floor(sample_y)
+            y_high = min(y_low + 1, height - 1)
+            ly = sample_y - y_low
+            for col in range(out_w):
+                sample_x = x1 + (col + 0.5) * (x2 - x1) / out_w
+                sample_x = min(max(sample_x, 0.0), width - 1.0)
+                x_low = math.floor(sample_x)
+                x_high = min(x_low + 1, width - 1)
+                lx = sample_x - x_low
+                top = x[y_low, x_low] * (1 - lx) + x[y_low, x_high] * lx
+                bottom = x[y_high, x_low] * (1 - lx) + x[y_high, x_high] * lx
+                out[row, col] = top * (1 - ly) + bottom * ly
+        return out
+
+    add(
+        slug="roi-align-single",
+        title="手搓单区域 ROI Align",
+        difficulty="困难",
+        category="计算机视觉",
+        function_name="roi_align_single",
+        signature="def roi_align_single(feature: Any, box: list[float], output_size: list[int]) -> torch.Tensor",
+        description="给定单通道二维特征图和连续坐标框 [x1,y1,x2,y2]，在每个输出网格中心做一次双线性采样，返回指定 [out_h,out_w] 的 ROI Align 结果。越界采样坐标截断到特征图边界。",
+        reference=ref_roi_align_single,
+        raw_cases=[
+            case([[[1.0, 2.0], [3.0, 4.0]], [0.0, 0.0, 1.0, 1.0], [1, 1]]),
+            case([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]], [0.0, 0.0, 2.0, 2.0], [2, 2]]),
+            case([[[1.0, 2.0], [3.0, 4.0]], [0.0, 0.0, 1.0, 1.0], [2, 3]]),
+            case([[[5.0]], [0.0, 0.0, 0.0, 0.0], [2, 2]]),
+            case([[[0.0, 10.0], [20.0, 30.0]], [0.25, 0.25, 0.75, 0.75], [1, 1]]),
+            case([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], [-1.0, -1.0, 3.0, 2.0], [2, 2]]),
+            case([[[1.0, -1.0], [-1.0, 1.0]], [0.0, 0.0, 1.0, 1.0], [3, 3]]),
+            case([[[1.0, 2.0, 3.0, 4.0]], [0.0, 0.0, 3.0, 0.0], [1, 3]]),
+        ],
+        imports=torch_imports(),
+        solution_code="""from typing import Any
+import math
+import torch
+
+def roi_align_single(feature, box, output_size):
+    feature = torch.as_tensor(feature, dtype=torch.float64)
+    x1, y1, x2, y2 = map(float, box)
+    out_h, out_w = output_size
+    height, width = feature.shape
+    output = torch.empty((out_h, out_w), dtype=feature.dtype)
+    for row in range(out_h):
+        y = y1 + (row + 0.5) * (y2 - y1) / out_h
+        y = min(max(y, 0.0), height - 1.0)
+        y0, y1i = math.floor(y), min(math.floor(y) + 1, height - 1)
+        wy = y - y0
+        for col in range(out_w):
+            x = x1 + (col + 0.5) * (x2 - x1) / out_w
+            x = min(max(x, 0.0), width - 1.0)
+            x0, x1i = math.floor(x), min(math.floor(x) + 1, width - 1)
+            wx = x - x0
+            top = feature[y0, x0] * (1 - wx) + feature[y0, x1i] * wx
+            bottom = feature[y1i, x0] * (1 - wx) + feature[y1i, x1i] * wx
+            output[row, col] = top * (1 - wy) + bottom * wy
+    return output
+""",
+        explanation="这道题保留 ROI Align 最关键的两件事：不用取整量化坐标，并用双线性插值获得连续位置的特征。",
+        constraints=["feature 是非空二维数组", "box 顺序为 [x1,y1,x2,y2] 且 x2>=x1、y2>=y1", "output_size 两项均大于 0"],
+        company_tags=["Meta", "商汤", "字节跳动", "NVIDIA"],
+    )
+
+    def ref_clip_symmetric_loss(image_embeddings: Any, text_embeddings: Any, temperature: float) -> float:
+        import torch.nn.functional as F
+
+        image = F.normalize(torch.as_tensor(image_embeddings, dtype=torch.float64), dim=1)
+        text = F.normalize(torch.as_tensor(text_embeddings, dtype=torch.float64), dim=1)
+        logits = image @ text.transpose(0, 1) / temperature
+        labels = torch.arange(logits.shape[0])
+        return float((F.cross_entropy(logits, labels) + F.cross_entropy(logits.transpose(0, 1), labels)) / 2)
+
+    add(
+        slug="clip-symmetric-loss",
+        title="CLIP 对称对比学习损失",
+        difficulty="中等",
+        category="多模态学习",
+        function_name="clip_symmetric_loss",
+        signature="def clip_symmetric_loss(image_embeddings: Any, text_embeddings: Any, temperature: float) -> float",
+        description="实现 CLIP 风格的对称对比损失。图像和文本 embedding 按行 L2 归一化，同一下标是正样本，最终返回 image-to-text 与 text-to-image 交叉熵的平均值。",
+        reference=ref_clip_symmetric_loss,
+        raw_cases=[
+            case([[[1.0, 0.0], [0.0, 1.0]], [[1.0, 0.0], [0.0, 1.0]], 1.0]),
+            case([[[1.0, 1.0], [1.0, -1.0]], [[2.0, 2.0], [2.0, -2.0]], 0.5]),
+            case([[[1.0, 0.0]], [[0.0, 1.0]], 0.1]),
+            case([[[1.0, 2.0], [3.0, 4.0], [-1.0, 2.0]], [[2.0, 1.0], [4.0, 3.0], [-2.0, 1.0]], 0.7]),
+            case([[[-1.0, 0.0], [0.0, -1.0]], [[-1.0, 0.0], [0.0, -1.0]], 0.25]),
+            case([[[3.0, 4.0], [4.0, 3.0]], [[6.0, 8.0], [8.0, 6.0]], 2.0]),
+            case([[[1.0, 0.0, 1.0], [0.0, 1.0, 1.0]], [[1.0, 0.0, 0.5], [0.0, 1.0, 0.5]], 0.3]),
+            case([[[0.1, 0.2], [0.2, 0.1]], [[0.2, 0.1], [0.1, 0.2]], 1.5]),
+        ],
+        imports="from typing import Any\nimport torch\nimport torch.nn.functional as F",
+        solution_code="""from typing import Any
+import torch
+import torch.nn.functional as F
+
+def clip_symmetric_loss(image_embeddings, text_embeddings, temperature):
+    image = F.normalize(torch.as_tensor(image_embeddings, dtype=torch.float64), dim=1)
+    text = F.normalize(torch.as_tensor(text_embeddings, dtype=torch.float64), dim=1)
+    logits = image @ text.transpose(0, 1) / temperature
+    labels = torch.arange(logits.shape[0])
+    image_loss = F.cross_entropy(logits, labels)
+    text_loss = F.cross_entropy(logits.transpose(0, 1), labels)
+    return float((image_loss + text_loss) / 2)
+""",
+        explanation="CLIP 同时训练图像检索文本和文本检索图像，因此不能只算单向 InfoNCE；两个方向共享相似度矩阵并取平均。",
+        constraints=["两组输入形状相同且为 (batch, dim)", "每行向量范数大于 0", "temperature > 0"],
+        company_tags=["OpenAI", "字节跳动", "Google", "Meta"],
+    )
+
+    def ref_multi_head_attention(q: Any, k: Any, v: Any, num_heads: int) -> torch.Tensor:
+        query = torch.as_tensor(q, dtype=torch.float64)
+        key = torch.as_tensor(k, dtype=torch.float64)
+        value = torch.as_tensor(v, dtype=torch.float64)
+        batch, query_len, model_dim = query.shape
+        key_len = key.shape[1]
+        head_dim = model_dim // num_heads
+        qh = query.reshape(batch, query_len, num_heads, head_dim).permute(0, 2, 1, 3)
+        kh = key.reshape(batch, key_len, num_heads, head_dim).permute(0, 2, 1, 3)
+        vh = value.reshape(batch, key_len, num_heads, head_dim).permute(0, 2, 1, 3)
+        scores = qh @ kh.transpose(-2, -1) / math.sqrt(head_dim)
+        exp_scores = torch.exp(scores - scores.max(dim=-1, keepdim=True).values)
+        weights = exp_scores / exp_scores.sum(dim=-1, keepdim=True)
+        heads = weights @ vh
+        return heads.permute(0, 2, 1, 3).contiguous().reshape(batch, query_len, model_dim)
+
+    add(
+        slug="multi-head-self-attention",
+        title="手搓多头注意力 MHA",
+        difficulty="困难",
+        category="大模型核心组件",
+        function_name="multi_head_attention",
+        signature="def multi_head_attention(q: Any, k: Any, v: Any, num_heads: int) -> torch.Tensor",
+        description="输入已经线性投影好的 Q、K、V，形状分别为 (B,Lq,D)、(B,Lk,D)、(B,Lk,D)。手动拆头、计算缩放点积注意力并合并，题目不包含 mask 和输出投影。",
+        reference=ref_multi_head_attention,
+        raw_cases=[
+            case([[[[1.0, 0.0], [0.0, 1.0]]], [[[1.0, 0.0], [0.0, 1.0]]], [[[1.0, 2.0], [3.0, 4.0]]], 1]),
+            case([[[[1.0, 0.0, 1.0, 0.0], [0.0, 1.0, 0.0, 1.0]]], [[[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 1.0, 0.0]]], [[[1.0, 2.0, 3.0, 4.0], [4.0, 3.0, 2.0, 1.0]]], 2]),
+            case([[[[1.0, 1.0]]], [[[1.0, 0.0], [0.0, 1.0]]], [[[2.0, 0.0], [0.0, 2.0]]], 1]),
+            case([[[[0.0, 0.0], [0.0, 0.0]]], [[[1.0, 0.0], [0.0, 1.0]]], [[[1.0, 3.0], [5.0, 7.0]]], 2]),
+            case([[[[-1.0, 1.0], [1.0, -1.0]]], [[[-1.0, 1.0], [1.0, -1.0]]], [[[1.0, 0.0], [0.0, 1.0]]], 1]),
+            case([[[[1.0, 2.0]], [[3.0, 4.0]]], [[[1.0, 0.0]], [[0.0, 1.0]]], [[[5.0, 6.0]], [[7.0, 8.0]]], 2]),
+            case([[[[1.0, 2.0, 3.0, 4.0]]], [[[4.0, 3.0, 2.0, 1.0]]], [[[1.0, 1.0, 2.0, 2.0]]], 1]),
+            case([[[[1.0, 0.0], [0.0, 1.0]]], [[[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]], [[[1.0, 0.0], [0.0, 1.0], [2.0, 2.0]]], 1]),
+        ],
+        imports=torch_imports(),
+        solution_code="""from typing import Any
+import math
+import torch
+
+def multi_head_attention(q, k, v, num_heads):
+    q = torch.as_tensor(q, dtype=torch.float64)
+    k = torch.as_tensor(k, dtype=torch.float64)
+    v = torch.as_tensor(v, dtype=torch.float64)
+    batch, query_len, model_dim = q.shape
+    key_len = k.shape[1]
+    head_dim = model_dim // num_heads
+    q = q.reshape(batch, query_len, num_heads, head_dim).permute(0, 2, 1, 3)
+    k = k.reshape(batch, key_len, num_heads, head_dim).permute(0, 2, 1, 3)
+    v = v.reshape(batch, key_len, num_heads, head_dim).permute(0, 2, 1, 3)
+    scores = q @ k.transpose(-2, -1) / math.sqrt(head_dim)
+    exp_scores = torch.exp(scores - scores.max(dim=-1, keepdim=True).values)
+    weights = exp_scores / exp_scores.sum(dim=-1, keepdim=True)
+    heads = weights @ v
+    return heads.permute(0, 2, 1, 3).contiguous().reshape(batch, query_len, model_dim)
+""",
+        explanation="MHA 的难点主要是维度顺序：先从 (B,L,D) 变成 (B,H,L,Dh)，算完注意力后再严格按相反顺序合并。",
+        constraints=["Q、K、V 的 batch 和最后一维一致", "K、V 序列长度一致", "model_dim 能被 num_heads 整除"],
+        company_tags=["Google", "OpenAI", "Meta", "字节跳动"],
+    )
+
+    def ref_multiclass_nms(boxes: list[list[float]], scores: list[float], labels: list[int], iou_threshold: float) -> list[int]:
+        def iou(first: list[float], second: list[float]) -> float:
+            left, top = max(first[0], second[0]), max(first[1], second[1])
+            right, bottom = min(first[2], second[2]), min(first[3], second[3])
+            intersection = max(0.0, right - left) * max(0.0, bottom - top)
+            area_a = max(0.0, first[2] - first[0]) * max(0.0, first[3] - first[1])
+            area_b = max(0.0, second[2] - second[0]) * max(0.0, second[3] - second[1])
+            union = area_a + area_b - intersection
+            return 0.0 if union == 0 else intersection / union
+
+        kept: list[int] = []
+        for label in sorted(set(labels)):
+            order = sorted((i for i, value in enumerate(labels) if value == label), key=lambda i: (-scores[i], i))
+            while order:
+                current = order.pop(0)
+                kept.append(current)
+                order = [index for index in order if iou(boxes[current], boxes[index]) <= iou_threshold]
+        return sorted(kept, key=lambda i: (-scores[i], i))
+
+    add(
+        slug="multiclass-nms",
+        title="多分类 NMS",
+        difficulty="中等",
+        category="计算机视觉",
+        function_name="multiclass_nms",
+        signature="def multiclass_nms(boxes: list[list[float]], scores: list[float], labels: list[int], iou_threshold: float) -> list[int]",
+        description="对检测框按类别分别执行 NMS，不同类别的框互不抑制。返回所有保留框的原下标，并按分数降序排列；同分时下标较小者优先。",
+        reference=ref_multiclass_nms,
+        raw_cases=[
+            case([[[0, 0, 2, 2], [0, 0, 2, 2], [0, 0, 2, 2]], [0.9, 0.8, 0.7], [0, 0, 1], 0.5]),
+            case([[[0, 0, 1, 1], [2, 2, 3, 3]], [0.6, 0.9], [1, 1], 0.5]),
+            case([[[0, 0, 2, 2], [1, 1, 3, 3]], [0.9, 0.8], [0, 0], 0.2]),
+            case([[], [], [], 0.5]),
+            case([[[0, 0, 1, 1]], [0.5], [3], 0.5]),
+            case([[[0, 0, 4, 4], [1, 1, 3, 3], [10, 10, 11, 11]], [0.8, 0.9, 0.7], [2, 2, 2], 0.3]),
+            case([[[0, 0, 2, 2], [0, 0, 2, 2], [3, 3, 4, 4]], [0.5, 0.5, 0.5], [0, 0, 1], 0.9]),
+            case([[[0, 0, 0, 0], [0, 0, 1, 1]], [1.0, 0.5], [0, 0], 0.0]),
+        ],
+        imports=py_imports(),
+        solution_code="""def multiclass_nms(boxes, scores, labels, iou_threshold):
+    def iou(a, b):
+        left, top = max(a[0], b[0]), max(a[1], b[1])
+        right, bottom = min(a[2], b[2]), min(a[3], b[3])
+        intersection = max(0.0, right - left) * max(0.0, bottom - top)
+        area_a = max(0.0, a[2] - a[0]) * max(0.0, a[3] - a[1])
+        area_b = max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+        union = area_a + area_b - intersection
+        return 0.0 if union == 0 else intersection / union
+
+    kept = []
+    for label in sorted(set(labels)):
+        order = sorted(
+            (i for i, value in enumerate(labels) if value == label),
+            key=lambda i: (-scores[i], i),
+        )
+        while order:
+            current = order.pop(0)
+            kept.append(current)
+            order = [i for i in order if iou(boxes[current], boxes[i]) <= iou_threshold]
+    return sorted(kept, key=lambda i: (-scores[i], i))
+""",
+        explanation="多分类 NMS 与普通 NMS 的核心差别只有一个：抑制必须限制在同一类别中，最后再合并各类别结果。",
+        constraints=["boxes、scores、labels 长度相同", "框格式为 [x1,y1,x2,y2]", "0 <= iou_threshold <= 1"],
+        company_tags=["商汤", "旷视", "字节跳动", "Amazon"],
+    )
+
+    def ref_sft_shifted_loss(logits: Any, input_ids: Any, ignore_index: int = -100) -> float:
+        import torch.nn.functional as F
+
+        all_scores = torch.as_tensor(logits, dtype=torch.float64)
+        scores = all_scores[:, :-1, :].reshape(-1, all_scores.shape[-1])
+        labels = torch.as_tensor(input_ids, dtype=torch.long)[:, 1:].reshape(-1)
+        if not bool((labels != ignore_index).any()):
+            return 0.0
+        return float(F.cross_entropy(scores, labels, ignore_index=ignore_index))
+
+    add(
+        slug="sft-shifted-loss",
+        title="SFT Shift Right 损失",
+        difficulty="中等",
+        category="大模型训练与对齐",
+        function_name="sft_shifted_loss",
+        signature="def sft_shifted_loss(logits: Any, input_ids: Any, ignore_index: int = -100) -> float",
+        description="计算自回归监督微调的 token 交叉熵：位置 t 的 logits 用来预测 input_ids 的位置 t+1，等于 ignore_index 的标签不计入平均。若没有有效标签，返回 0.0。",
+        reference=ref_sft_shifted_loss,
+        raw_cases=[
+            case([[[[3.0, 1.0], [1.0, 3.0], [2.0, 2.0]]], [[0, 0, 1]]]),
+            case([[[[1.0, 2.0, 3.0], [3.0, 2.0, 1.0]]], [[2, 1]]]),
+            case([[[[2.0, 0.0], [0.0, 2.0]], [[0.0, 2.0], [2.0, 0.0]]], [[0, 1], [1, 0]]]),
+            case([[[[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]], [[0, -100, -100]]]),
+            case([[[[1.0, 0.0], [0.0, 1.0]]], [[0, -100]]]),
+            case([[[[5.0, 0.0, 0.0], [0.0, 5.0, 0.0], [0.0, 0.0, 5.0]]], [[0, 1, 2]]]),
+            case([[[[-1.0, 1.0], [1.0, -1.0], [0.0, 0.0]]], [[1, 0, 1]], -1]),
+            case([[[[0.1, 0.2], [0.3, 0.4], [0.5, 0.6], [0.7, 0.8]]], [[0, 1, 0, 1]]]),
+        ],
+        imports="from typing import Any\nimport torch\nimport torch.nn.functional as F",
+        solution_code="""from typing import Any
+import torch
+import torch.nn.functional as F
+
+def sft_shifted_loss(logits, input_ids, ignore_index=-100):
+    logits = torch.as_tensor(logits, dtype=torch.float64)
+    labels = torch.as_tensor(input_ids, dtype=torch.long)
+    shift_logits = logits[:, :-1, :].reshape(-1, logits.shape[-1])
+    shift_labels = labels[:, 1:].reshape(-1)
+    if not bool((shift_labels != ignore_index).any()):
+        return 0.0
+    return float(F.cross_entropy(shift_logits, shift_labels, ignore_index=ignore_index))
+""",
+        explanation="自回归模型没有把标签真的搬到右边；实现时通常是 logits 去掉最后一位、labels 去掉第一位，让两者自然错开一格。",
+        constraints=["logits 形状为 (B,L,V)，input_ids 为 (B,L)", "L >= 2", "有效标签位于 [0,V)"],
+        company_tags=["OpenAI", "字节跳动", "阿里巴巴", "Anthropic"],
+    )
+
+    def ref_ppo_clipped_loss(new_log_probs: Any, old_log_probs: Any, advantages: Any, clip_eps: float) -> float:
+        new = torch.as_tensor(new_log_probs, dtype=torch.float64)
+        old = torch.as_tensor(old_log_probs, dtype=torch.float64)
+        advantage = torch.as_tensor(advantages, dtype=torch.float64)
+        ratio = torch.exp(new - old)
+        clipped = torch.clamp(ratio, 1 - clip_eps, 1 + clip_eps)
+        return float(-torch.minimum(ratio * advantage, clipped * advantage).mean())
+
+    add(
+        slug="ppo-clipped-loss",
+        title="PPO Clipped Surrogate Loss",
+        difficulty="中等",
+        category="大模型训练与对齐",
+        function_name="ppo_clipped_loss",
+        signature="def ppo_clipped_loss(new_log_probs: Any, old_log_probs: Any, advantages: Any, clip_eps: float) -> float",
+        description="实现 PPO 的 clipped surrogate policy loss，不包含 value loss、entropy bonus 和 mask。返回训练时需要最小化的负目标均值。",
+        reference=ref_ppo_clipped_loss,
+        raw_cases=[
+            case([[0.0, 0.0], [0.0, 0.0], [1.0, -1.0], 0.2]),
+            case([[0.3, -0.3], [0.0, 0.0], [1.0, 1.0], 0.2]),
+            case([[0.3, -0.3], [0.0, 0.0], [-1.0, -1.0], 0.2]),
+            case([[-2.0, 2.0], [0.0, 0.0], [2.0, -2.0], 0.1]),
+            case([[[0.0, 0.1], [0.2, 0.3]], [[0.0, 0.0], [0.0, 0.0]], [[1.0, -1.0], [0.5, -0.5]], 0.3]),
+            case([[0.1], [0.2], [0.0], 0.2]),
+            case([[-0.1, 0.1, 0.2], [-0.2, 0.0, 0.4], [1.0, 2.0, 3.0], 0.05]),
+            case([[1.0, -1.0], [0.5, -0.5], [-2.0, 2.0], 0.4]),
+        ],
+        imports=torch_imports(),
+        solution_code="""from typing import Any
+import torch
+
+def ppo_clipped_loss(new_log_probs, old_log_probs, advantages, clip_eps):
+    new = torch.as_tensor(new_log_probs, dtype=torch.float64)
+    old = torch.as_tensor(old_log_probs, dtype=torch.float64)
+    advantages = torch.as_tensor(advantages, dtype=torch.float64)
+    ratio = torch.exp(new - old)
+    clipped_ratio = torch.clamp(ratio, 1 - clip_eps, 1 + clip_eps)
+    objective = torch.minimum(ratio * advantages, clipped_ratio * advantages)
+    return float(-objective.mean())
+""",
+        explanation="注意优势为负时也要逐元素取 minimum；直接先截断 ratio 再乘 advantage 会漏掉 PPO 的悲观下界。",
+        constraints=["三组输入形状相同且非空", "0 < clip_eps < 1", "输入是所选 action 的 log probability"],
+        company_tags=["OpenAI", "DeepMind", "Anthropic", "字节跳动"],
+    )
+
+    def ref_gae(rewards: list[float], values: list[float], dones: list[bool], gamma: float, lam: float) -> torch.Tensor:
+        result = torch.empty(len(rewards), dtype=torch.float64)
+        next_advantage = 0.0
+        for step in range(len(rewards) - 1, -1, -1):
+            alive = 0.0 if dones[step] else 1.0
+            delta = rewards[step] + gamma * alive * values[step + 1] - values[step]
+            next_advantage = delta + gamma * lam * alive * next_advantage
+            result[step] = next_advantage
+        return result
+
+    add(
+        slug="generalized-advantage-estimation",
+        title="PPO 广义优势估计 GAE",
+        difficulty="中等",
+        category="大模型训练与对齐",
+        function_name="generalized_advantage_estimation",
+        signature="def generalized_advantage_estimation(rewards: list[float], values: list[float], dones: list[bool], gamma: float, lam: float) -> torch.Tensor",
+        description="给定长度 T 的 rewards、dones 和长度 T+1 的 values，从后向前计算 GAE。done=True 时不得使用下一状态 value，也不得把后续优势传过终止边界。",
+        reference=ref_gae,
+        raw_cases=[
+            case([[1.0, 1.0], [0.5, 0.5, 0.0], [False, True], 0.99, 0.95]),
+            case([[1.0], [0.0, 0.0], [True], 0.9, 0.8]),
+            case([[0.0, 0.0, 1.0], [0.2, 0.3, 0.4, 0.0], [False, False, True], 1.0, 1.0]),
+            case([[-1.0, 2.0], [0.0, 0.5, 1.0], [False, False], 0.5, 0.5]),
+            case([[1.0, 2.0, 3.0], [1.0, 1.0, 1.0, 1.0], [False, True, False], 0.9, 0.7]),
+            case([[0.5, 0.5], [0.1, 0.2, 0.3], [False, False], 0.0, 0.95]),
+            case([[2.0, -1.0, 0.0], [0.0, 0.0, 0.0, 2.0], [False, False, False], 1.0, 0.0]),
+            case([[1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0, 0.0], [False, False, False, True], 0.9, 0.9]),
+        ],
+        imports=torch_imports(),
+        solution_code="""import torch
+
+def generalized_advantage_estimation(rewards, values, dones, gamma, lam):
+    advantages = torch.empty(len(rewards), dtype=torch.float64)
+    next_advantage = 0.0
+    for step in range(len(rewards) - 1, -1, -1):
+        alive = 0.0 if dones[step] else 1.0
+        delta = rewards[step] + gamma * alive * values[step + 1] - values[step]
+        next_advantage = delta + gamma * lam * alive * next_advantage
+        advantages[step] = next_advantage
+    return advantages
+""",
+        explanation="GAE 必须倒序计算，因为当前优势依赖下一步优势；done mask 要同时作用在 bootstrap value 和递推项上。",
+        constraints=["len(values)=len(rewards)+1", "len(dones)=len(rewards)", "0 <= gamma, lam <= 1"],
+        company_tags=["OpenAI", "DeepMind", "Anthropic", "腾讯"],
+    )
+
+    def ref_dpo_loss(policy_chosen: Any, policy_rejected: Any, reference_chosen: Any, reference_rejected: Any, beta: float) -> float:
+        pi_c = torch.as_tensor(policy_chosen, dtype=torch.float64)
+        pi_r = torch.as_tensor(policy_rejected, dtype=torch.float64)
+        ref_c = torch.as_tensor(reference_chosen, dtype=torch.float64)
+        ref_r = torch.as_tensor(reference_rejected, dtype=torch.float64)
+        margin = beta * ((pi_c - pi_r) - (ref_c - ref_r))
+        return float(torch.logaddexp(torch.zeros_like(margin), -margin).mean())
+
+    add(
+        slug="dpo-loss",
+        title="DPO 偏好优化损失",
+        difficulty="中等",
+        category="大模型训练与对齐",
+        function_name="dpo_loss",
+        signature="def dpo_loss(policy_chosen: Any, policy_rejected: Any, reference_chosen: Any, reference_rejected: Any, beta: float) -> float",
+        description="根据策略模型与参考模型对 chosen/rejected 回答的序列 log probability，计算标准 DPO logistic loss 的 batch 均值。",
+        reference=ref_dpo_loss,
+        raw_cases=[
+            case([[-1.0, -2.0], [-2.0, -1.0], [-1.5, -1.5], [-1.5, -1.5], 0.1]),
+            case([[-1.0], [-3.0], [-2.0], [-2.0], 1.0]),
+            case([[-3.0], [-1.0], [-2.0], [-2.0], 1.0]),
+            case([[-2.0, -4.0], [-3.0, -2.0], [-2.5, -3.0], [-2.5, -3.0], 0.5]),
+            case([[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0], 0.2]),
+            case([[-10.0, -20.0], [-11.0, -19.0], [-10.5, -20.5], [-10.5, -20.5], 0.05]),
+            case([[-0.5, -0.7, -0.9], [-1.0, -0.8, -0.6], [-0.6, -0.6, -0.6], [-0.9, -0.9, -0.9], 0.3]),
+            case([[-2.0], [-2.1], [-1.0], [-3.0], 2.0]),
+        ],
+        imports=torch_imports(),
+        solution_code="""from typing import Any
+import torch
+
+def dpo_loss(policy_chosen, policy_rejected, reference_chosen, reference_rejected, beta):
+    policy_chosen = torch.as_tensor(policy_chosen, dtype=torch.float64)
+    policy_rejected = torch.as_tensor(policy_rejected, dtype=torch.float64)
+    reference_chosen = torch.as_tensor(reference_chosen, dtype=torch.float64)
+    reference_rejected = torch.as_tensor(reference_rejected, dtype=torch.float64)
+    margin = beta * (
+        (policy_chosen - policy_rejected)
+        - (reference_chosen - reference_rejected)
+    )
+    return float(torch.logaddexp(torch.zeros_like(margin), -margin).mean())
+""",
+        explanation="DPO 比较的是策略模型相对参考模型提升了多少偏好间隔，而不是单独让 chosen 的概率变大。logaddexp 是 −log sigmoid 的稳定写法。",
+        constraints=["四组 log probability 形状相同且非空", "beta > 0", "每项是整段回答的 log probability"],
+        company_tags=["Anthropic", "OpenAI", "阿里巴巴", "字节跳动"],
+    )
+
+    def ref_grpo_clipped_loss(new_log_probs: Any, old_log_probs: Any, rewards: Any, clip_eps: float) -> float:
+        new = torch.as_tensor(new_log_probs, dtype=torch.float64)
+        old = torch.as_tensor(old_log_probs, dtype=torch.float64)
+        reward = torch.as_tensor(rewards, dtype=torch.float64)
+        centered = reward - reward.mean(dim=1, keepdim=True)
+        advantages = centered / (torch.sqrt((centered * centered).mean(dim=1, keepdim=True)) + 1e-8)
+        ratio = torch.exp(new - old)
+        clipped = torch.clamp(ratio, 1 - clip_eps, 1 + clip_eps)
+        return float(-torch.minimum(ratio * advantages, clipped * advantages).mean())
+
+    add(
+        slug="grpo-clipped-loss",
+        title="GRPO 组相对策略损失",
+        difficulty="困难",
+        category="大模型训练与对齐",
+        function_name="grpo_clipped_loss",
+        signature="def grpo_clipped_loss(new_log_probs: Any, old_log_probs: Any, rewards: Any, clip_eps: float) -> float",
+        description="每一行表示同一 prompt 采样的一组回答。先在组内用总体标准差标准化 reward 得到相对优势，再计算 PPO 风格的 clipped policy loss。",
+        reference=ref_grpo_clipped_loss,
+        raw_cases=[
+            case([[[0.0, 0.0]], [[0.0, 0.0]], [[1.0, 2.0]], 0.2]),
+            case([[[0.1, -0.1], [0.2, -0.2]], [[0.0, 0.0], [0.0, 0.0]], [[3.0, 1.0], [0.0, 2.0]], 0.2]),
+            case([[[0.0, 0.0, 0.0]], [[0.0, 0.0, 0.0]], [[5.0, 5.0, 5.0]], 0.2]),
+            case([[[1.0, -1.0]], [[0.0, 0.0]], [[-1.0, 1.0]], 0.1]),
+            case([[[0.0, 0.2, -0.2], [0.1, 0.0, -0.1]], [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]], [[1.0, 3.0, 2.0], [4.0, 0.0, 2.0]], 0.3]),
+            case([[[-0.5, 0.5]], [[-0.4, 0.4]], [[10.0, 0.0]], 0.5]),
+            case([[[0.2, 0.1, 0.0, -0.1]], [[0.0, 0.0, 0.0, 0.0]], [[1.0, 2.0, 4.0, 8.0]], 0.15]),
+            case([[[2.0, -2.0], [-1.0, 1.0]], [[0.0, 0.0], [0.0, 0.0]], [[2.0, -2.0], [-3.0, 3.0]], 0.4]),
+        ],
+        imports=torch_imports(),
+        solution_code="""from typing import Any
+import torch
+
+def grpo_clipped_loss(new_log_probs, old_log_probs, rewards, clip_eps):
+    new = torch.as_tensor(new_log_probs, dtype=torch.float64)
+    old = torch.as_tensor(old_log_probs, dtype=torch.float64)
+    rewards = torch.as_tensor(rewards, dtype=torch.float64)
+    centered = rewards - rewards.mean(dim=1, keepdim=True)
+    scale = torch.sqrt((centered * centered).mean(dim=1, keepdim=True))
+    advantages = centered / (scale + 1e-8)
+    ratio = torch.exp(new - old)
+    clipped_ratio = torch.clamp(ratio, 1 - clip_eps, 1 + clip_eps)
+    objective = torch.minimum(ratio * advantages, clipped_ratio * advantages)
+    return float(-objective.mean())
+""",
+        explanation="GRPO 的核心是同一 prompt 内做相对比较，因此归一化维度是每一行的 group 维，而不是整个 batch。",
+        constraints=["输入均为形状 (groups,candidates) 的非空二维数组", "每组至少 2 个回答", "0 < clip_eps < 1"],
+        company_tags=["DeepSeek", "OpenAI", "字节跳动", "阿里巴巴"],
+    )
+
+    def ref_append_kv_cache(cache_k: Any, cache_v: Any, new_k: Any, new_v: Any) -> tuple[torch.Tensor, torch.Tensor]:
+        old_k = torch.as_tensor(cache_k, dtype=torch.float64)
+        old_v = torch.as_tensor(cache_v, dtype=torch.float64)
+        step_k = torch.as_tensor(new_k, dtype=torch.float64)
+        step_v = torch.as_tensor(new_v, dtype=torch.float64)
+        return torch.cat((old_k, step_k), dim=2), torch.cat((old_v, step_v), dim=2)
+
+    add(
+        slug="kv-cache-append",
+        title="增量解码 KV Cache 更新",
+        difficulty="简单",
+        category="大模型推理与部署",
+        function_name="append_kv_cache",
+        signature="def append_kv_cache(cache_k: Any, cache_v: Any, new_k: Any, new_v: Any) -> tuple[torch.Tensor, torch.Tensor]",
+        description="K、V 缓存形状为 (B,H,L,D)，新产生的 K、V 为 (B,H,T,D)。沿序列维追加新 token，并返回更新后的 (K_cache,V_cache)。",
+        reference=ref_append_kv_cache,
+        raw_cases=[
+            case([[[[[1.0, 0.0], [0.0, 1.0]]]], [[[[2.0, 0.0], [0.0, 2.0]]]], [[[[3.0, 3.0]]]], [[[[4.0, 4.0]]]]]),
+            case([[[[[1.0]], [[2.0]]]], [[[[3.0]], [[4.0]]]], [[[[5.0]], [[6.0]]]], [[[[7.0]], [[8.0]]]]]),
+            case([tensor([], shape=[1, 1, 0, 2]), tensor([], shape=[1, 1, 0, 2]), [[[[1.0, 2.0]]]], [[[[3.0, 4.0]]]]]),
+            case([[[[[1.0]]]], [[[[2.0]]]], [[[[3.0], [4.0]]]], [[[[5.0], [6.0]]]]]),
+            case([[[[[1.0, 2.0, 3.0]]]], [[[[4.0, 5.0, 6.0]]]], [[[[7.0, 8.0, 9.0]]]], [[[[10.0, 11.0, 12.0]]]]]),
+            case([[[[[-1.0]], [[-2.0]]]], [[[[1.0]], [[2.0]]]], [[[[0.0]], [[0.0]]]], [[[[3.0]], [[4.0]]]]]),
+            case([[[[[1.0]], [[2.0]]], [[[3.0]], [[4.0]]]], [[[[5.0]], [[6.0]]], [[[7.0]], [[8.0]]]], [[[[9.0]], [[10.0]]], [[[11.0]], [[12.0]]]], [[[[13.0]], [[14.0]]], [[[15.0]], [[16.0]]]]]),
+            case([tensor([], shape=[2, 1, 0, 1]), tensor([], shape=[2, 1, 0, 1]), [[[[1.0]]], [[[2.0]]]], [[[[3.0]]], [[[4.0]]]]]),
+        ],
+        imports=torch_imports(),
+        solution_code="""from typing import Any
+import torch
+
+def append_kv_cache(cache_k, cache_v, new_k, new_v):
+    cache_k = torch.as_tensor(cache_k, dtype=torch.float64)
+    cache_v = torch.as_tensor(cache_v, dtype=torch.float64)
+    new_k = torch.as_tensor(new_k, dtype=torch.float64)
+    new_v = torch.as_tensor(new_v, dtype=torch.float64)
+    return (
+        torch.cat((cache_k, new_k), dim=2),
+        torch.cat((cache_v, new_v), dim=2),
+    )
+""",
+        explanation="KV Cache 追加的唯一关键是识别序列维。常见布局 (B,H,L,D) 中 L 在 dim=2，不能误接到 head 或特征维。",
+        constraints=["四个输入均为四维", "除序列长度外对应维度相同", "new_k 与 new_v 的 T 相同"],
+        company_tags=["NVIDIA", "OpenAI", "字节跳动", "阿里巴巴"],
+    )
+
+    def ref_multi_query_attention(q: Any, k: Any, v: Any) -> torch.Tensor:
+        query = torch.as_tensor(q, dtype=torch.float64)
+        key = torch.as_tensor(k, dtype=torch.float64)
+        value = torch.as_tensor(v, dtype=torch.float64)
+        scores = query @ key.unsqueeze(1).transpose(-2, -1) / math.sqrt(query.shape[-1])
+        exp_scores = torch.exp(scores - scores.max(dim=-1, keepdim=True).values)
+        weights = exp_scores / exp_scores.sum(dim=-1, keepdim=True)
+        return weights @ value.unsqueeze(1)
+
+    add(
+        slug="multi-query-attention",
+        title="手搓 Multi-Query Attention",
+        difficulty="困难",
+        category="大模型核心组件",
+        function_name="multi_query_attention",
+        signature="def multi_query_attention(q: Any, k: Any, v: Any) -> torch.Tensor",
+        description="Q 的形状是 (B,H,Lq,D)，共享 K、V 的形状是 (B,Lk,D)。计算无 mask 的 Multi-Query Attention，返回 (B,H,Lq,D)。不得复制出真实的 H 份 K、V。",
+        reference=ref_multi_query_attention,
+        raw_cases=[
+            case([[[[[1.0, 0.0], [0.0, 1.0]], [[0.0, 1.0], [1.0, 0.0]]]], [[[1.0, 0.0], [0.0, 1.0]]], [[[1.0, 2.0], [3.0, 4.0]]]]),
+            case([[[[[1.0, 1.0]]]], [[[1.0, 0.0], [0.0, 1.0]]], [[[2.0, 0.0], [0.0, 2.0]]]]),
+            case([[[[[0.0, 0.0]], [[0.0, 0.0]], [[0.0, 0.0]]]], [[[1.0, 0.0], [0.0, 1.0]]], [[[1.0, 3.0], [5.0, 7.0]]]]),
+            case([[[[[-1.0, 1.0], [1.0, -1.0]], [[1.0, 1.0], [-1.0, -1.0]]]], [[[-1.0, 1.0], [1.0, -1.0]]], [[[1.0, 0.0], [0.0, 1.0]]]]),
+            case([[[[[1.0]], [[2.0]]], [[[3.0]], [[4.0]]]], [[[1.0]], [[2.0]]], [[[5.0]], [[6.0]]]]),
+            case([[[[[1.0, 2.0, 3.0]]]], [[[3.0, 2.0, 1.0]]], [[[4.0, 5.0, 6.0]]]]),
+            case([[[[[1.0, 0.0]]]], [[[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]], [[[1.0, 0.0], [0.0, 1.0], [2.0, 2.0]]]]),
+            case([[[[[1.0, 0.0]], [[0.0, 1.0]]], [[[0.5, 0.5]], [[-0.5, 0.5]]]], [[[1.0, 0.0], [0.0, 1.0]], [[1.0, 1.0], [-1.0, 1.0]]], [[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]]]),
+        ],
+        imports=torch_imports(),
+        solution_code="""from typing import Any
+import math
+import torch
+
+def multi_query_attention(q, k, v):
+    q = torch.as_tensor(q, dtype=torch.float64)
+    k = torch.as_tensor(k, dtype=torch.float64)
+    v = torch.as_tensor(v, dtype=torch.float64)
+    shared_k = k.unsqueeze(1)
+    shared_v = v.unsqueeze(1)
+    scores = q @ shared_k.transpose(-2, -1) / math.sqrt(q.shape[-1])
+    exp_scores = torch.exp(scores - scores.max(dim=-1, keepdim=True).values)
+    weights = exp_scores / exp_scores.sum(dim=-1, keepdim=True)
+    return weights @ shared_v
+""",
+        explanation="MQA 的计算与多头注意力相同，但 K、V 没有 head 维；利用广播共享它们即可，没必要 repeat 占用额外内存。",
+        constraints=["q 形状为 (B,H,Lq,D)", "k、v 形状为 (B,Lk,D)", "所有序列长度均大于 0"],
+        company_tags=["Google", "NVIDIA", "OpenAI", "Meta"],
+    )
+
+    def ref_flash_attention(q: Any, k: Any, v: Any, block_size: int) -> torch.Tensor:
+        query = torch.as_tensor(q, dtype=torch.float64)
+        key = torch.as_tensor(k, dtype=torch.float64)
+        value = torch.as_tensor(v, dtype=torch.float64)
+        output = torch.empty((query.shape[0], value.shape[1]), dtype=query.dtype)
+        scale = math.sqrt(query.shape[1])
+        for row, current_query in enumerate(query):
+            maximum = -float("inf")
+            denominator = 0.0
+            accumulator = torch.zeros(value.shape[1], dtype=query.dtype)
+            for start in range(0, key.shape[0], block_size):
+                block_k = key[start : start + block_size]
+                block_v = value[start : start + block_size]
+                scores = block_k @ current_query / scale
+                new_maximum = max(maximum, float(scores.max()))
+                correction = 0.0 if maximum == -float("inf") else math.exp(maximum - new_maximum)
+                probabilities = torch.exp(scores - new_maximum)
+                accumulator = accumulator * correction + probabilities @ block_v
+                denominator = denominator * correction + float(probabilities.sum())
+                maximum = new_maximum
+            output[row] = accumulator / denominator
+        return output
+
+    add(
+        slug="flash-attention-online",
+        title="分块在线 Softmax Attention",
+        difficulty="困难",
+        category="大模型推理与部署",
+        function_name="flash_attention_online",
+        signature="def flash_attention_online(q: Any, k: Any, v: Any, block_size: int) -> torch.Tensor",
+        description="实现简化版 FlashAttention：Q、K 为 (Lq,D)、(Lk,D)，V 为 (Lk,Dv)。按 block_size 遍历 K/V，并用在线 Softmax 统计量得到与标准 attention 相同的输出；不得构造完整 (Lq,Lk) 分数矩阵。",
+        reference=ref_flash_attention,
+        raw_cases=[
+            case([[[1.0, 0.0], [0.0, 1.0]], [[1.0, 0.0], [0.0, 1.0]], [[1.0, 2.0], [3.0, 4.0]], 1]),
+            case([[[1.0, 1.0]], [[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]], [[1.0], [2.0], [3.0]], 2]),
+            case([[[0.0, 0.0]], [[1.0, 0.0], [0.0, 1.0]], [[2.0, 4.0], [6.0, 8.0]], 8]),
+            case([[[-1.0, 1.0], [1.0, -1.0]], [[-1.0, 1.0], [1.0, -1.0], [1.0, 1.0]], [[1.0, 0.0], [0.0, 1.0], [2.0, 2.0]], 2]),
+            case([[[1.0]], [[1.0]], [[5.0, 6.0, 7.0]], 1]),
+            case([[[10.0, 0.0]], [[10.0, 0.0], [-10.0, 0.0], [0.0, 10.0]], [[1.0], [2.0], [3.0]], 1]),
+            case([[[1.0, 2.0, 3.0]], [[3.0, 2.0, 1.0], [1.0, 2.0, 3.0]], [[1.0, 1.0], [2.0, 2.0]], 2]),
+            case([[[0.5, -0.5], [-0.5, 0.5]], [[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], [0.0, -1.0]], [[1.0], [2.0], [3.0], [4.0]], 3]),
+        ],
+        imports=torch_imports(),
+        solution_code="""from typing import Any
+import math
+import torch
+
+def flash_attention_online(q, k, v, block_size):
+    q = torch.as_tensor(q, dtype=torch.float64)
+    k = torch.as_tensor(k, dtype=torch.float64)
+    v = torch.as_tensor(v, dtype=torch.float64)
+    output = torch.empty((q.shape[0], v.shape[1]), dtype=q.dtype)
+    scale = math.sqrt(q.shape[1])
+    for row, query in enumerate(q):
+        running_max = -float("inf")
+        running_sum = 0.0
+        weighted_sum = torch.zeros(v.shape[1], dtype=q.dtype)
+        for start in range(0, k.shape[0], block_size):
+            key_block = k[start : start + block_size]
+            value_block = v[start : start + block_size]
+            scores = key_block @ query / scale
+            new_max = max(running_max, float(scores.max()))
+            correction = 0.0 if running_max == -float("inf") else math.exp(running_max - new_max)
+            exp_scores = torch.exp(scores - new_max)
+            weighted_sum = weighted_sum * correction + exp_scores @ value_block
+            running_sum = running_sum * correction + float(exp_scores.sum())
+            running_max = new_max
+        output[row] = weighted_sum / running_sum
+    return output
+""",
+        explanation="分块后每块的最大值不同，不能直接把局部 Softmax 结果相加。关键是当全局最大值更新时，用 exp(old_max−new_max) 重标定历史分母和加权和。",
+        constraints=["Q、K 的 D 相同，K、V 的 Lk 相同", "所有长度均大于 0", "block_size >= 1"],
+        company_tags=["NVIDIA", "OpenAI", "字节跳动", "Meta"],
+    )
+
+    assert len(problems) == 92
     return problems

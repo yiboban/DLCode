@@ -10,6 +10,7 @@ export interface ProblemListItem {
   source_note: string;
   acceptance_rate: number;
   completed: boolean;
+  favorited: boolean;
   submit_count: number;
   pass_count: number;
 }
@@ -32,9 +33,21 @@ export interface ProblemDetail extends ProblemListItem {
     symbols: string[];
     steps: string[];
   };
+  lecture: {
+    solution: string[];
+    functions: Array<{ name: string; description: string }>;
+    memory_tips: string[];
+    solutions: Array<{
+      kind: "manual" | "api" | "standard";
+      title: string;
+      summary: string;
+      code: string;
+    }>;
+  };
   constraints: string[];
   examples: Array<Record<string, unknown>>;
   public_tests: Array<Record<string, unknown>>;
+  default_test_case: unknown;
   time_limit: number;
   memory_limit: number;
 }

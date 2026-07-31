@@ -1,4 +1,4 @@
-import { ArrowDownUp, CheckCircle2, Search } from "lucide-react";
+import { ArrowDownUp, CheckCircle2, Search, Star } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../api";
@@ -10,6 +10,7 @@ export default function ProblemsPage() {
   const [data, setData] = useState<ProblemsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [favoritePending, setFavoritePending] = useState<Set<number>>(() => new Set());
 
   const filters = useMemo(
     () => ({
@@ -41,6 +42,40 @@ export default function ProblemsPage() {
     if (value) next.set(key, value);
     else next.delete(key);
     setSearchParams(next);
+  }
+
+  async function toggleFavorite(problem: ProblemListItem) {
+    if (favoritePending.has(problem.id)) return;
+    const nextValue = !problem.favorited;
+    setFavoritePending((current) => new Set(current).add(problem.id));
+    setData((current) =>
+      current
+        ? {
+            ...current,
+            items: current.items.map((item) => (item.id === problem.id ? { ...item, favorited: nextValue } : item)),
+          }
+        : current,
+    );
+    try {
+      await api.setFavorite(problem.id, nextValue);
+      setError("");
+    } catch (err) {
+      setData((current) =>
+        current
+          ? {
+              ...current,
+              items: current.items.map((item) => (item.id === problem.id ? { ...item, favorited: problem.favorited } : item)),
+            }
+          : current,
+      );
+      setError(err instanceof Error ? err.message : "收藏状态更新失败");
+    } finally {
+      setFavoritePending((current) => {
+        const next = new Set(current);
+        next.delete(problem.id);
+        return next;
+      });
+    }
   }
 
   return (
@@ -112,7 +147,12 @@ export default function ProblemsPage() {
         ) : (
           <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
             {(data?.items ?? []).map((problem) => (
-              <ProblemRow key={problem.id} problem={problem} />
+              <ProblemRow
+                key={problem.id}
+                problem={problem}
+                pending={favoritePending.has(problem.id)}
+                onToggleFavorite={() => void toggleFavorite(problem)}
+              />
             ))}
             {data?.items.length === 0 && <div className="p-8 text-center text-sm text-zinc-500">没有符合条件的题目。</div>}
           </div>
@@ -122,16 +162,36 @@ export default function ProblemsPage() {
   );
 }
 
-function ProblemRow({ problem }: { problem: ProblemListItem }) {
+function ProblemRow({
+  problem,
+  pending,
+  onToggleFavorite,
+}: {
+  problem: ProblemListItem;
+  pending: boolean;
+  onToggleFavorite: () => void;
+}) {
   return (
-    <Link
-      to={`/problems/${problem.slug}`}
-      className="grid gap-2 px-4 py-4 text-sm hover:bg-zinc-50 md:grid-cols-[80px_1.2fr_120px_1fr_1fr_110px_90px] md:items-center dark:hover:bg-zinc-800/70"
-    >
+    <div className="grid gap-2 px-4 py-4 text-sm hover:bg-zinc-50 md:grid-cols-[80px_1.2fr_120px_1fr_1fr_110px_90px] md:items-center dark:hover:bg-zinc-800/70">
       <div className="text-zinc-500">#{problem.id}</div>
-      <div className="font-medium">
-        <span className="mr-2 md:hidden">题目：</span>
-        {problem.title}
+      <div className="flex min-w-0 items-center gap-2 font-medium">
+        <button
+          type="button"
+          onClick={onToggleFavorite}
+          disabled={pending}
+          aria-label={problem.favorited ? `取消收藏 ${problem.title}` : `收藏 ${problem.title}`}
+          title={problem.favorited ? "取消收藏" : "加入收藏"}
+          className={cx(
+            "inline-flex h-7 w-7 shrink-0 items-center justify-center rounded transition hover:bg-amber-50 disabled:opacity-50 dark:hover:bg-amber-950/30",
+            problem.favorited ? "text-amber-500" : "text-zinc-300 hover:text-amber-500 dark:text-zinc-600",
+          )}
+        >
+          <Star size={18} fill={problem.favorited ? "currentColor" : "none"} />
+        </button>
+        <Link to={`/problems/${problem.slug}`} className="truncate hover:text-moss">
+          <span className="mr-2 md:hidden">题目：</span>
+          {problem.title}
+        </Link>
       </div>
       <div>
         <span className={`rounded px-2 py-1 text-xs ${difficultyClass(problem.difficulty)}`}>{problem.difficulty}</span>
@@ -149,7 +209,7 @@ function ProblemRow({ problem }: { problem: ProblemListItem }) {
         {problem.completed && <CheckCircle2 size={16} />}
         {problem.completed ? "已完成" : "未完成"}
       </div>
-    </Link>
+    </div>
   );
 }
 
