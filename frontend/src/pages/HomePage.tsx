@@ -1,9 +1,9 @@
-import { ArrowRight, CheckCircle2, Layers, ListChecks } from "lucide-react";
+import { ArrowRight, CheckCircle2, Layers, ListChecks, Star } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
-import type { StatisticsResponse } from "../types";
-import { statusClass } from "../utils";
+import type { ProblemListItem, StatisticsResponse } from "../types";
+import { difficultyClass, statusClass } from "../utils";
 
 const paths = [
   "Python 与 PyTorch 基础",
@@ -23,10 +23,12 @@ const paths = [
 
 export default function HomePage() {
   const [stats, setStats] = useState<StatisticsResponse | null>(null);
+  const [favorites, setFavorites] = useState<ProblemListItem[]>([]);
   const [error, setError] = useState("");
 
   useEffect(() => {
     api.statistics().then(setStats).catch((err: Error) => setError(err.message));
+    api.favorites().then(setFavorites).catch((err: Error) => setError(err.message));
   }, []);
 
   return (
@@ -59,10 +61,56 @@ export default function HomePage() {
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-1">
           <Metric icon={Layers} label="题目总数" value={stats?.total_problems ?? "--"} />
           <Metric icon={CheckCircle2} label="已完成题目" value={stats?.completed_problems ?? "--"} />
+          <Metric icon={Star} label="收藏题目" value={favorites.length} />
         </div>
       </section>
 
       {error && <div className="mt-4 rounded-md border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">{error}</div>}
+
+      <section className="mt-5 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <h2 className="flex items-center gap-2 text-lg font-semibold">
+            <Star size={19} className="text-amber-500" fill="currentColor" />
+            我的收藏
+            <span className="rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
+              {favorites.length}
+            </span>
+          </h2>
+          <Link to="/problems" className="text-sm text-zinc-500 hover:text-moss dark:text-zinc-400">
+            浏览全部题目
+          </Link>
+        </div>
+        {favorites.length ? (
+          <div className="scrollbar-thin grid max-h-[360px] gap-2 overflow-y-auto pr-1 sm:grid-cols-2 xl:grid-cols-3">
+            {favorites.map((problem) => (
+              <Link
+                key={problem.id}
+                to={`/problems/${problem.slug}`}
+                className="group flex min-w-0 items-center gap-3 rounded-md border border-zinc-200 px-3 py-3 hover:border-amber-300 hover:bg-amber-50/40 dark:border-zinc-800 dark:hover:border-amber-800 dark:hover:bg-amber-950/10"
+              >
+                <Star size={17} className="shrink-0 text-amber-500" fill="currentColor" />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-medium group-hover:text-moss">
+                    <span className="mr-2 text-zinc-400">#{problem.id}</span>
+                    {problem.title}
+                  </div>
+                  <div className="mt-1 flex items-center gap-2">
+                    <span className={`rounded px-1.5 py-0.5 text-[11px] ${difficultyClass(problem.difficulty)}`}>{problem.difficulty}</span>
+                    <span className={problem.completed ? "text-xs text-emerald-600" : "text-xs text-zinc-400"}>
+                      {problem.completed ? "已完成" : "待练习"}
+                    </span>
+                  </div>
+                </div>
+                <ArrowRight size={15} className="shrink-0 text-zinc-400 group-hover:text-moss" />
+              </Link>
+            ))}
+          </div>
+        ) : (
+          <div className="rounded-md border border-dashed border-zinc-300 bg-zinc-50 px-4 py-7 text-center text-sm text-zinc-500 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-400">
+            暂无收藏。在题库或题目页点亮小星星，想重做的题就会出现在这里。
+          </div>
+        )}
+      </section>
 
       <section className="mt-5 grid gap-5 lg:grid-cols-[0.8fr_1.2fr]">
         <div className="rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">

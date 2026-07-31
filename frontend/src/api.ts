@@ -6,6 +6,7 @@ import type {
   StatisticsResponse,
   SubmissionDetail,
   SubmissionItem,
+  ProblemListItem,
 } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:8000";
@@ -58,6 +59,12 @@ function queryString(query: ProblemQuery): string {
 export const api = {
   problems: (query: ProblemQuery = {}) => request<ProblemsResponse>(`/api/problems${queryString(query)}`),
   problem: (slug: string) => request<ProblemDetail>(`/api/problems/${slug}`),
+  favorites: () => request<ProblemListItem[]>("/api/favorites"),
+  setFavorite: (problemId: number, favorited: boolean) =>
+    request<{ problem_id: number; favorited: boolean }>(`/api/favorites/${problemId}`, {
+      method: "PUT",
+      body: JSON.stringify({ favorited }),
+    }),
   statistics: () => request<StatisticsResponse>("/api/statistics"),
   draft: (problemId: number) => request<DraftResponse>(`/api/drafts/${problemId}`),
   saveDraft: (problemId: number, code: string) =>
