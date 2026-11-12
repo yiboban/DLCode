@@ -72,6 +72,8 @@ DLCode/
 
 ## 安装步骤
 
+以下安装、启动和测试命令均需在仓库根目录（包含 `package.json` 的 `DLCode` 目录）中执行。
+
 Windows、macOS、Linux 通用：
 
 ```bash
